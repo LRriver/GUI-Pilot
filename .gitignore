@@ -1,0 +1,23 @@
+.DS_Store
+.env
+.claude/
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+
+# Local datasets, generated outputs, and archived packages.
+*.zip
+code-for-student/test_data/
+code-for-student/output*/
+code-for-student/**/output*/
+submit_version/*.zip
+
+# Large third-party reference projects kept for reading, not versioning here.
+refer_pro/
+
+# Common local caches.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
