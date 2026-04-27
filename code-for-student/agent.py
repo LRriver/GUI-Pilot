@@ -201,6 +201,18 @@ def _typed_text(history_actions: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _typed_texts(history_actions: List[Dict[str, Any]]) -> List[str]:
+    """Return all prior TYPE payloads in chronological order."""
+    texts = []
+    for item in history_actions or []:
+        if item.get("action") == ACTION_TYPE:
+            params = item.get("parameters") or {}
+            text = str(params.get("text") or "")
+            if text:
+                texts.append(text)
+    return texts
+
+
 def _last_action(history_actions: List[Dict[str, Any]]) -> str:
     """Return previous action name from runner history."""
     if not history_actions:
@@ -1184,7 +1196,7 @@ Parameters: <JSON参数>
         x, y = int(point[0]), int(point[1])
         if x >= 760 or y <= 200:
             return None
-        if y < 360:
+        if y < 240:
             return None
         return ACTION_CLICK, {"point": confirm_point}, "typed_query_submit_search"
 
@@ -1219,13 +1231,27 @@ Parameters: <JSON参数>
         if not current_text:
             return None
 
+        typed_history = [_clean_text(t) for t in _typed_texts(input_data.history_actions or [])]
+        current_clean = _clean_text(current_text)
+        origin_clean = _clean_text(origin)
+        dest_clean = _clean_text(dest)
+
         thought = str(content or "")
         if re.search(r"起点|出发地|从哪里|输入起", thought):
             if current_text != origin:
                 return ACTION_TYPE, {"text": origin}, "route_origin_text"
+            return None
         if re.search(r"终点|目的地|去哪|输入终|到达地", thought):
             if current_text != dest:
                 return ACTION_TYPE, {"text": dest}, "route_destination_text"
+            return None
+        if re.search(r"打车|叫车|用车|上车", input_data.instruction):
+            if not typed_history and current_clean == origin_clean:
+                return ACTION_TYPE, {"text": dest}, "taxi_first_field_destination_text"
+        if origin_clean in typed_history and current_clean == origin_clean and dest_clean not in typed_history:
+            return ACTION_TYPE, {"text": dest}, "route_next_destination_text"
+        if dest_clean in typed_history and current_clean == dest_clean and origin_clean not in typed_history:
+            return ACTION_TYPE, {"text": origin}, "route_next_origin_text"
         return None
 
     def _build_messages(self, instruction: str, image, step: int,
