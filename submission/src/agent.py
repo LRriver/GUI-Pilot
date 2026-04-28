@@ -26,6 +26,7 @@ REVIEW_TEXT_RE = (
     r"打分|评分|星级|买家秀|心得|写一?段|写个|写一下"
 )
 SUBMIT_RE = r"发布|发表|发送|提交|确认|保存"
+SOCIAL_TEXT_APPS = {"抖音", "快手", "哔哩哔哩", "爱奇艺", "腾讯视频", "小红书", "微博", "今日头条"}
 
 
 # ============================================================
@@ -87,6 +88,12 @@ def _extract_app_name(instruction: str) -> Optional[str]:
         if alias in instruction:
             return APP_ALIASES[alias]
     return None
+
+
+def _requires_social_text_submit(instruction: str) -> bool:
+    """Treat social/video text tasks as publish/send flows even when wording is terse."""
+    app_name = _extract_app_name(instruction) or ""
+    return app_name in SOCIAL_TEXT_APPS and bool(re.search(REVIEW_TEXT_RE, instruction))
 
 
 def _clean_text(text: str) -> str:
@@ -359,11 +366,12 @@ class Agent(BaseAgent):
         must_submit = re.search(rf"{SUBMIT_RE}|下单|支付", instruction)
         text_task = re.search(REVIEW_TEXT_RE, instruction)
         comment_text = _extract_comment_text(instruction)
+        implicit_submit_app = _requires_social_text_submit(instruction)
 
-        if comment_text and comment_text == typed and not must_submit:
+        if comment_text and comment_text == typed and not must_submit and not implicit_submit_app:
             return _workflow_action(ACTION_COMPLETE, {}, "free_text_complete")
 
-        if text_task and len(typed) >= 10 and not must_submit:
+        if text_task and len(typed) >= 10 and not must_submit and not implicit_submit_app:
             return _workflow_action(ACTION_COMPLETE, {}, "review_text_complete")
 
         return None
@@ -379,7 +387,7 @@ class Agent(BaseAgent):
             return None
 
         instruction = input_data.instruction
-        must_submit = re.search(SUBMIT_RE, instruction)
+        must_submit = re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction)
         text_task = re.search(REVIEW_TEXT_RE, instruction)
         if not (must_submit and text_task):
             return None
@@ -1034,7 +1042,7 @@ class Agent(BaseAgent):
 - 如果刚输入搜索词，优先点击搜索按钮、键盘搜索键或可见的第一条搜索建议，不要点无关筛选/范围。
 - 如果还没看到光标、键盘或激活输入框，不要 TYPE，先 CLICK 输入框。
 - 购买/外卖任务要区分店铺和商品：已进入店铺但未定位商品时，优先点击店内搜索/放大镜/目标商品/规格/加号，不要用 SCROLL 代替明确操作。
-- 如果刚输入评论/评价且用户要求发布/发送/提交，下一步点发布/发送/提交；如果用户只要求填写文本且已填好，可以 COMPLETE。
+- 如果刚输入评论/评价且用户要求发布/发送/提交，或当前是抖音/快手/视频/社交类评论评价任务，下一步点发布/发送/提交；只有纯填写文本且已填好时才可以 COMPLETE。
 - 只有目标结果或任务完成状态在截图上已经明确出现，才 COMPLETE。
 
 输出格式必须是：
@@ -1055,7 +1063,7 @@ Parameters: <JSON参数>
 
         typed = _typed_text(history_actions)
         last_action = _last_action(history_actions)
-        submit_intent = bool(re.search(SUBMIT_RE, instruction))
+        submit_intent = bool(re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction))
         text_intent = bool(re.search(REVIEW_TEXT_RE, instruction))
         search_intent = bool(re.search(r"搜索|查找|查询", instruction))
         content_mentions_submit = bool(re.search(r"发布|发表|发送|提交|确认|完成|保存|send|submit", content, re.IGNORECASE))
@@ -1157,7 +1165,7 @@ Parameters: <JSON参数>
         if not history_actions:
             return False
 
-        submit_intent = bool(re.search(SUBMIT_RE, instruction))
+        submit_intent = bool(re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction))
         text_intent = bool(re.search(REVIEW_TEXT_RE, instruction))
         if typed and text_intent and not submit_intent:
             return True
@@ -1182,7 +1190,7 @@ Parameters: <JSON参数>
         typed = _typed_text(history_actions)
         if not typed or len(typed) < 2:
             return None
-        submit_intent = re.search(SUBMIT_RE, instruction)
+        submit_intent = re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction)
         text_intent = re.search(REVIEW_TEXT_RE, instruction)
         if not (submit_intent and text_intent):
             return None
@@ -1219,7 +1227,7 @@ Parameters: <JSON参数>
         typed = _typed_text(history_actions)
         if not typed:
             return None
-        must_submit = re.search(SUBMIT_RE, instruction)
+        must_submit = re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction)
         if must_submit:
             if re.search(r"评论|留言|回复", instruction) and not re.search(r"评价|好评|差评|晒单|追评|点评|买家秀", instruction):
                 return ACTION_CLICK, {"point": [885, 915]}, "repeat_text_submit_comment"
@@ -1682,7 +1690,7 @@ Parameters: <JSON参数>
         """Build narrow state-aware rules without changing the base prompt."""
         history_actions = history_actions or []
         rules = []
-        submit_intent = re.search(SUBMIT_RE, instruction)
+        submit_intent = re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction)
         text_intent = re.search(REVIEW_TEXT_RE, instruction)
         search_intent = re.search(r"搜索|查找|查询", instruction)
         purchase_intent = re.search(r"购买|下单|外卖|加入购物车|结算|支付|点一?份", instruction)
@@ -1695,7 +1703,7 @@ Parameters: <JSON参数>
         if _last_action(history_actions) == ACTION_TYPE and typed:
             if submit_intent and text_intent:
                 rules.append(
-                    "- 上一步刚输入评价/评论文本，且用户明确要求发布/发送/提交；下一步优先寻找并点击截图里的“发布/发送/提交/完成/确认”按钮，不要滚动、不要重新输入。"
+                    "- 上一步刚输入评价/评论文本，且当前任务需要发布/发送/提交；下一步优先寻找并点击截图里的“发布/发送/提交/完成/确认”按钮，不要滚动、不要重新输入。"
                 )
             elif search_intent:
                 rules.append(
@@ -1742,7 +1750,7 @@ Parameters: <JSON参数>
         app_name = _extract_app_name(instruction) or "从截图识别"
         typed = _typed_text(history_actions)
         comment_text = _extract_comment_text(instruction)
-        submit_intent = "是" if re.search(SUBMIT_RE, instruction) else "否"
+        submit_intent = "是" if re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction) else "否"
         search_keyword = _extract_search_keyword(instruction, app_name if app_name != "从截图识别" else "")
         store_target, product_target = _extract_purchase_targets(instruction)
         origin, dest = _extract_route_points(instruction)
@@ -1798,7 +1806,7 @@ Parameters: <JSON参数>
         last_action = _last_action(history_actions)
         has_search = bool(re.search(r"搜索|查找|查询|搜", instruction))
         has_text = bool(re.search(REVIEW_TEXT_RE, instruction))
-        must_submit = bool(re.search(SUBMIT_RE, instruction))
+        must_submit = bool(re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction))
         has_route = bool(origin and dest)
         has_purchase = bool(re.search(r"购买|下单|外卖|加入购物车|结算|支付", instruction))
         has_play = bool(re.search(r"播放|打开.*视频|第\s*[一二三四五六七八九十\d]+\s*[集期]|下载列表|我的下载", instruction))
@@ -1867,8 +1875,8 @@ Parameters: <JSON参数>
 这是并发候选B。请故意从“可见控件和任务阶段”重新判断一次，不要沿用第一个直觉：
 - 先判断任务已完成了哪些子目标、还缺哪一个子目标。
 - 对 CLICK，优先点带文字/图标语义的按钮、标签、输入框、星级或搜索/发送控件；少点无文字的卡片中心。
-- 对 COMPLETE，只有确认截图已经呈现目标结果，或用户只要求填写文本且文本已输入、没有显式发布/发送/提交要求时才完成。
-- 如果刚输入搜索词，下一步通常是搜索键、搜索按钮或第一条搜索建议；如果刚输入评论且要求发布，下一步通常是发送/发布按钮。
+- 对 COMPLETE，只有确认截图已经呈现目标结果，或用户只要求填写文本且文本已输入、没有发布/发送/提交要求时才完成；短视频/视频/社交类评论评价输入后通常还要点击发布/发送。
+- 如果刚输入搜索词，下一步通常是搜索键、搜索按钮或第一条搜索建议；如果刚输入评论/评价且任务需要发布或属于短视频/视频/社交类 app，下一步通常是发送/发布按钮。
 - 路线/打车/导航任务里，看到“输入起点/出发地”就输入起点；看到“终点/目的地/你要去哪儿”就输入终点，不要把两者混用。
 """
         else:
