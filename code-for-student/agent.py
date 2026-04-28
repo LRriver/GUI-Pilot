@@ -158,6 +158,27 @@ def _extract_comment_text(instruction: str) -> str:
     ], instruction)
 
 
+def _extract_purchase_targets(instruction: str) -> Tuple[str, str]:
+    """Extract store/product targets from purchase or food-order wording."""
+    store, product = "", ""
+    patterns = [
+        r"(?:购买|下单|点一?份|买)(.+?)店铺的(.+?)(?:，|,|。|$)",
+        r"(?:去|在)(.+?)店铺(?:购买|下单|点一?份|买)(.+?)(?:，|,|。|$)",
+        r"(?:去|在)(.+?)(?:店|店铺).*?(?:购买|下单|点一?份|买)(.+?)(?:，|,|。|$)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, instruction)
+        if match:
+            store = _clean_text(match.group(1))
+            product = _clean_text(match.group(2))
+            break
+    if not store:
+        store = _extract_first([r"(?:购买|去|在)(.+?)店铺", r"(.+?)店铺的"], instruction)
+    if not product:
+        product = _extract_first([r"店铺的(.+?)(?:，|,|。|$)", r"(?:购买|下单|点一?份|买)(.+?)(?:，|,|。|$)"], instruction)
+    return store, product
+
+
 def _extract_route_points(instruction: str) -> Tuple[str, str]:
     """Extract route origin and destination from navigation/taxi wording."""
     route = re.search(r"从(.+?)(?:去|到)(.+?)(?:，|,|。|$)", instruction)
@@ -671,14 +692,39 @@ class Agent(BaseAgent):
                     action, params, reason = repeat_text_fix
                     raw_output += f"\n\n[Postprocess] {reason}"
 
+                purchase_done_fix = self._postprocess_purchase_complete(input_data, action, params)
+                if purchase_done_fix:
+                    action, params, reason = purchase_done_fix
+                    raw_output += f"\n\n[Postprocess] {reason}"
+
+                query_type_fix = self._postprocess_query_click_type(input_data, action, params)
+                if query_type_fix:
+                    action, params, reason = query_type_fix
+                    raw_output += f"\n\n[Postprocess] {reason}"
+
                 focus_fix = self._postprocess_search_type_focus(input_data, action, params)
                 if focus_fix:
                     action, params, reason = focus_fix
                     raw_output += f"\n\n[Postprocess] {reason}"
 
+                click_focus_fix = self._postprocess_search_click_focus(input_data, action, params)
+                if click_focus_fix:
+                    action, params, reason = click_focus_fix
+                    raw_output += f"\n\n[Postprocess] {reason}"
+
                 search_fix = self._postprocess_search_confirm(input_data, action, params)
                 if search_fix:
                     action, params, reason = search_fix
+                    raw_output += f"\n\n[Postprocess] {reason}"
+
+                filter_fix = self._postprocess_filter_entry(input_data, action, params)
+                if filter_fix:
+                    action, params, reason = filter_fix
+                    raw_output += f"\n\n[Postprocess] {reason}"
+
+                video_fix = self._postprocess_video_result_click(input_data, action, params)
+                if video_fix:
+                    action, params, reason = video_fix
                     raw_output += f"\n\n[Postprocess] {reason}"
 
                 route_fix = self._postprocess_route_type(input_data, action, params, content)
@@ -788,14 +834,39 @@ class Agent(BaseAgent):
                 action, params, reason = repeat_text_fix
                 raw_output += f"\n\n[Postprocess] {reason}"
 
+            purchase_done_fix = self._postprocess_purchase_complete(input_data, action, params)
+            if purchase_done_fix:
+                action, params, reason = purchase_done_fix
+                raw_output += f"\n\n[Postprocess] {reason}"
+
+            query_type_fix = self._postprocess_query_click_type(input_data, action, params)
+            if query_type_fix:
+                action, params, reason = query_type_fix
+                raw_output += f"\n\n[Postprocess] {reason}"
+
             focus_fix = self._postprocess_search_type_focus(input_data, action, params)
             if focus_fix:
                 action, params, reason = focus_fix
                 raw_output += f"\n\n[Postprocess] {reason}"
 
+            click_focus_fix = self._postprocess_search_click_focus(input_data, action, params)
+            if click_focus_fix:
+                action, params, reason = click_focus_fix
+                raw_output += f"\n\n[Postprocess] {reason}"
+
             search_fix = self._postprocess_search_confirm(input_data, action, params)
             if search_fix:
                 action, params, reason = search_fix
+                raw_output += f"\n\n[Postprocess] {reason}"
+
+            filter_fix = self._postprocess_filter_entry(input_data, action, params)
+            if filter_fix:
+                action, params, reason = filter_fix
+                raw_output += f"\n\n[Postprocess] {reason}"
+
+            video_fix = self._postprocess_video_result_click(input_data, action, params)
+            if video_fix:
+                action, params, reason = video_fix
                 raw_output += f"\n\n[Postprocess] {reason}"
 
             route_fix = self._postprocess_route_type(input_data, action, params, content)
@@ -962,6 +1033,7 @@ class Agent(BaseAgent):
 - 下一步必须推进“当前子目标”，不要跳过搜索确认、地址候选、评分/输入框、发送/发布等中间步骤。
 - 如果刚输入搜索词，优先点击搜索按钮、键盘搜索键或可见的第一条搜索建议，不要点无关筛选/范围。
 - 如果还没看到光标、键盘或激活输入框，不要 TYPE，先 CLICK 输入框。
+- 购买/外卖任务要区分店铺和商品：已进入店铺但未定位商品时，优先点击店内搜索/放大镜/目标商品/规格/加号，不要用 SCROLL 代替明确操作。
 - 如果刚输入评论/评价且用户要求发布/发送/提交，下一步点发布/发送/提交；如果用户只要求填写文本且已填好，可以 COMPLETE。
 - 只有目标结果或任务完成状态在截图上已经明确出现，才 COMPLETE。
 
@@ -987,6 +1059,11 @@ Parameters: <JSON参数>
         text_intent = bool(re.search(REVIEW_TEXT_RE, instruction))
         search_intent = bool(re.search(r"搜索|查找|查询", instruction))
         content_mentions_submit = bool(re.search(r"发布|发表|发送|提交|确认|完成|保存|send|submit", content, re.IGNORECASE))
+        purchase_intent = bool(re.search(r"购买|下单|外卖|加入购物车|结算|支付|点一?份", instruction))
+        store_target, product_target = _extract_purchase_targets(instruction)
+        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
+        store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
+        product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
 
         if action == ACTION_COMPLETE:
             if self._is_completion_reasonable(input_data):
@@ -1012,10 +1089,17 @@ Parameters: <JSON参数>
                 elif search_intent and last_action == ACTION_TYPE and y >= 360 and x < 760:
                     score -= 2.0
                     notes.append("search_history_caution")
+                if purchase_intent and product_target and store_typed and not product_typed and y <= 160:
+                    score += 2.0
+                    notes.append("purchase_store_search")
         elif action == ACTION_TYPE:
+            new_text = _clean_text(str(params.get("text") or ""))
             if last_action == ACTION_TYPE:
                 score -= 5.0
                 notes.append("repeat_type")
+            elif purchase_intent and product_target and not product_typed and (product_target in new_text or new_text in product_target):
+                score += 3.0
+                notes.append("purchase_product_query")
             elif text_intent and not typed:
                 score += 1.5
                 notes.append("text_needed")
@@ -1029,6 +1113,9 @@ Parameters: <JSON参数>
             elif search_intent and last_action == ACTION_TYPE:
                 score -= 2.0
                 notes.append("scroll_after_query")
+            if purchase_intent and product_target and store_typed and not product_typed:
+                score -= 3.5
+                notes.append("scroll_before_product")
 
         if typed and submit_intent:
             if action == ACTION_CLICK:
@@ -1139,6 +1226,108 @@ Parameters: <JSON参数>
             return ACTION_CLICK, {"point": [500, 935]}, "repeat_text_submit_review"
         return ACTION_COMPLETE, {}, "repeat_text_complete"
 
+    def _postprocess_purchase_complete(
+        self,
+        input_data: AgentInput,
+        action: str,
+        params: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
+        """Stop after checkout/order-ready clicks to avoid unintended payment taps."""
+        if action != ACTION_CLICK:
+            return None
+
+        instruction = input_data.instruction
+        if not re.search(r"购买|下单|外卖|加入购物车|结算|点一?份", instruction):
+            return None
+        if re.search(r"支付|付款", instruction):
+            return None
+
+        history_actions = input_data.history_actions or []
+        if _last_action(history_actions) != ACTION_CLICK:
+            return None
+        last = history_actions[-1]
+        if last.get("is_valid") is False:
+            return None
+
+        store_target, product_target = _extract_purchase_targets(instruction)
+        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
+        if product_target:
+            product_done = any(product_target in text or text in product_target for text in typed_history)
+        else:
+            product_done = bool(typed_history)
+        if not product_done:
+            return None
+
+        prev_point = (last.get("parameters") or {}).get("point") or []
+        point = (params or {}).get("point") or []
+        if not (
+            isinstance(prev_point, list) and len(prev_point) == 2
+            and isinstance(point, list) and len(point) == 2
+        ):
+            return None
+        prev_x, prev_y = int(prev_point[0]), int(prev_point[1])
+        x, y = int(point[0]), int(point[1])
+        last_was_checkout = prev_x >= 700 and prev_y >= 820
+        next_is_bottom_order = x >= 700 and y >= 820
+        if last_was_checkout and next_is_bottom_order:
+            return ACTION_COMPLETE, {}, "purchase_checkout_complete"
+        return None
+
+    def _query_target_for_stage(self, instruction: str, history_actions: List[Dict[str, Any]]) -> str:
+        """Return the next query text implied by the task and typed history."""
+        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
+        store_target, product_target = _extract_purchase_targets(instruction)
+        purchase_like = re.search(r"购买|下单|外卖|店铺|商品|点一?份", instruction)
+        if purchase_like:
+            store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
+            product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
+            if store_target and not store_typed:
+                return store_target
+            if product_target and store_typed and not product_typed:
+                return product_target
+
+        app_name = _extract_app_name(instruction) or ""
+        keyword = _extract_search_keyword(instruction, app_name)
+        if keyword and not any(keyword in text or text in keyword for text in typed_history):
+            return keyword
+        return ""
+
+    def _postprocess_query_click_type(
+        self,
+        input_data: AgentInput,
+        action: str,
+        params: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
+        """Type the query when the input is already focused but the model clicks again."""
+        if action != ACTION_CLICK:
+            return None
+
+        history_actions = input_data.history_actions or []
+        if _last_action(history_actions) != ACTION_CLICK:
+            return None
+        query = self._query_target_for_stage(input_data.instruction, history_actions)
+        if not query:
+            return None
+
+        prev_point = (history_actions[-1].get("parameters") or {}).get("point") or []
+        point = (params or {}).get("point") or []
+        if not (
+            isinstance(prev_point, list) and len(prev_point) == 2
+            and isinstance(point, list) and len(point) == 2
+        ):
+            return None
+        input_point = self._search_input_point(input_data.instruction)
+        prev_focused = self._near_point(prev_point, input_point, threshold=30)
+        if not prev_focused:
+            return None
+
+        x, y = int(point[0]), int(point[1])
+        clicked_same_input = self._near_point(point, input_point, threshold=35)
+        clicked_history_or_body = y > 135 and not (x >= 760 and y <= 190)
+        if clicked_same_input or clicked_history_or_body:
+            return ACTION_TYPE, {"text": query}, "focused_query_type"
+        return None
+
     def _postprocess_search_type_focus(
         self,
         input_data: AgentInput,
@@ -1148,7 +1337,9 @@ Parameters: <JSON参数>
         """Click the search input before typing when only the search icon was opened."""
         if action != ACTION_TYPE:
             return None
-        if not re.search(r"搜索|查找|查询|搜", input_data.instruction):
+        search_like = re.search(r"搜索|查找|查询|搜", input_data.instruction)
+        purchase_like = re.search(r"购买|下单|外卖|店铺|商品|点一?份", input_data.instruction)
+        if not (search_like or purchase_like):
             return None
 
         history_actions = input_data.history_actions or []
@@ -1163,6 +1354,46 @@ Parameters: <JSON参数>
         x, y = int(point[0]), int(point[1])
         if x >= 720 and y <= 180:
             return ACTION_CLICK, {"point": self._search_input_point(input_data.instruction)}, "search_input_focus_before_type"
+        if purchase_like and y <= 180 and 80 <= x <= 900:
+            target = self._search_input_point(input_data.instruction)
+            if self._near_point(point, target, threshold=25):
+                return None
+            return ACTION_CLICK, {"point": target}, "purchase_search_input_focus_before_type"
+        return None
+
+    def _postprocess_search_click_focus(
+        self,
+        input_data: AgentInput,
+        action: str,
+        params: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
+        """When a search page opens, avoid tapping history chips before entering the query."""
+        if action != ACTION_CLICK:
+            return None
+
+        instruction = input_data.instruction
+        if not re.search(r"搜索|查找|查询|搜|购买|下单|外卖|店铺|商品|点一?份|订票|订酒店|航班|播放", instruction):
+            return None
+
+        history_actions = input_data.history_actions or []
+        if _typed_text(history_actions) or _last_action(history_actions) != ACTION_CLICK:
+            return None
+
+        prev_point = (history_actions[-1].get("parameters") or {}).get("point") or []
+        point = (params or {}).get("point") or []
+        if not (
+            isinstance(prev_point, list) and len(prev_point) == 2
+            and isinstance(point, list) and len(point) == 2
+        ):
+            return None
+
+        prev_x, prev_y = int(prev_point[0]), int(prev_point[1])
+        x, y = int(point[0]), int(point[1])
+        prev_opened_search = (prev_y <= 180 and 80 <= prev_x <= 900) or (prev_x >= 720 and prev_y <= 220)
+        current_is_top_control = y <= 135 or (x >= 760 and y <= 190)
+        current_is_history_area = 135 < y <= 560
+        if prev_opened_search and current_is_history_area and not current_is_top_control:
+            return ACTION_CLICK, {"point": self._search_input_point(instruction)}, "search_input_refocus_before_query"
         return None
 
     def _postprocess_search_confirm(
@@ -1195,17 +1426,71 @@ Parameters: <JSON参数>
         if not (isinstance(point, list) and len(point) == 2):
             return None
         x, y = int(point[0]), int(point[1])
+        app_name = _extract_app_name(input_data.instruction) or ""
+        if app_name == "快手" and y < 100:
+            return ACTION_CLICK, {"point": confirm_point}, "typed_query_submit_search"
         if x >= 760 or y <= 200:
             return None
         if y < 240:
             return None
         return ACTION_CLICK, {"point": confirm_point}, "typed_query_submit_search"
 
+    def _postprocess_filter_entry(
+        self,
+        input_data: AgentInput,
+        action: str,
+        params: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
+        """Prefer the visible top-right filter entry after search results load."""
+        if action != ACTION_CLICK:
+            return None
+        if not re.search(r"筛选|过滤", input_data.instruction):
+            return None
+        history_actions = input_data.history_actions or []
+        if not _typed_text(history_actions) or _last_action(history_actions) != ACTION_CLICK:
+            return None
+        point = (params or {}).get("point") or []
+        if not (isinstance(point, list) and len(point) == 2):
+            return None
+        x, y = int(point[0]), int(point[1])
+        if x >= 850 and 80 <= y <= 180:
+            return None
+        if y <= 220:
+            return ACTION_CLICK, {"point": [935, 122]}, "filter_entry_top_right"
+        return None
+
+    def _postprocess_video_result_click(
+        self,
+        input_data: AgentInput,
+        action: str,
+        params: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
+        """Adjust Tencent result-card clicks from the cover/body to the title/play row."""
+        if action != ACTION_CLICK:
+            return None
+        app_name = _extract_app_name(input_data.instruction) or ""
+        if app_name != "腾讯视频":
+            return None
+        if not re.search(r"搜索|播放|打开.*视频|第\s*[一二三四五六七八九十\d]+\s*[集期]", input_data.instruction):
+            return None
+        history_actions = input_data.history_actions or []
+        if not _typed_text(history_actions) or _last_action(history_actions) != ACTION_CLICK:
+            return None
+        point = (params or {}).get("point") or []
+        if not (isinstance(point, list) and len(point) == 2):
+            return None
+        x, y = int(point[0]), int(point[1])
+        if 60 <= x <= 650 and 420 <= y <= 540:
+            return ACTION_CLICK, {"point": [x, 390]}, "video_result_click_upper_row"
+        return None
+
     def _search_confirm_point(self, instruction: str) -> List[int]:
         """Return a conservative normalized point for the visible search action."""
         app_name = _extract_app_name(instruction) or ""
-        if app_name in {"抖音", "快手"}:
+        if app_name == "抖音":
             return [900, 80]
+        if app_name == "快手":
+            return [500, 130]
         return [850, 125]
 
     def _search_input_point(self, instruction: str) -> List[int]:
@@ -1213,7 +1498,9 @@ Parameters: <JSON参数>
         app_name = _extract_app_name(instruction) or ""
         if app_name in {"抖音", "快手"}:
             return [320, 80]
-        return [420, 100]
+        if app_name in {"美团", "饿了么", "大众点评"}:
+            return [420, 75]
+        return [420, 80]
 
     def _postprocess_route_type(
         self,
@@ -1398,6 +1685,11 @@ Parameters: <JSON参数>
         submit_intent = re.search(SUBMIT_RE, instruction)
         text_intent = re.search(REVIEW_TEXT_RE, instruction)
         search_intent = re.search(r"搜索|查找|查询", instruction)
+        purchase_intent = re.search(r"购买|下单|外卖|加入购物车|结算|支付|点一?份", instruction)
+        store_target, product_target = _extract_purchase_targets(instruction)
+        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
+        store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
+        product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
 
         typed = _typed_text(history_actions)
         if _last_action(history_actions) == ACTION_TYPE and typed:
@@ -1416,6 +1708,15 @@ Parameters: <JSON参数>
         elif text_intent and not typed and len(history_actions) >= 2:
             rules.append(
                 "- 当前仍在进入评价/评论/留言入口的阶段；优先点击可见的“评价/评论/去评价/写评价/追评/晒单/评分/星级/输入框”等文字、顶部标签或明确按钮，不要点击列表/商品卡片的空白中心，也不要在未看到光标或键盘时提前TYPE。"
+            )
+
+        if purchase_intent and product_target and store_typed and not product_typed:
+            rules.append(
+                "- 交易/外卖任务已输入过店铺但还没定位商品；若当前在店铺页，优先点击店内搜索/放大镜/商品搜索框并输入商品，或直接点可见目标商品/加号/规格，不要先滚动。"
+            )
+        elif purchase_intent and product_typed:
+            rules.append(
+                "- 交易/外卖任务已输入过商品；下一步优先点击目标商品、规格、加号、加入购物车、去结算或默认地址确认，只有目标商品不可见时才滚动。"
             )
 
         if not rules:
@@ -1443,6 +1744,7 @@ Parameters: <JSON参数>
         comment_text = _extract_comment_text(instruction)
         submit_intent = "是" if re.search(SUBMIT_RE, instruction) else "否"
         search_keyword = _extract_search_keyword(instruction, app_name if app_name != "从截图识别" else "")
+        store_target, product_target = _extract_purchase_targets(instruction)
         origin, dest = _extract_route_points(instruction)
         current_subgoal = self._infer_current_subgoal(
             instruction=instruction,
@@ -1462,12 +1764,19 @@ Parameters: <JSON参数>
             fields.append(f"- 当前子目标: {current_subgoal}")
         if search_keyword:
             fields.append(f"- 搜索目标: {search_keyword[:32]}")
+        if store_target:
+            fields.append(f"- 店铺目标: {store_target[:32]}")
+        if product_target:
+            fields.append(f"- 商品目标: {product_target[:32]}")
         if origin and dest:
             fields.append(f"- 路线/打车: 起点={origin[:18]}；终点={dest[:18]}")
         if comment_text:
             fields.append(f"- 指定输入文本: {comment_text[:28]}")
         if typed:
             fields.append(f"- 最近已输入: {typed[:28]}")
+        typed_history = _typed_texts(history_actions)
+        if len(typed_history) >= 2:
+            fields.append(f"- 已输入过: {' / '.join(_clean_text(t)[:16] for t in typed_history[-3:])}")
         if re.search(r"默认地址|选第一个|第一个|综合列表里第一个", instruction):
             fields.append("- 选择偏好: 按默认/第一个候选")
         if re.search(r"最便宜|最低价", instruction):
@@ -1493,6 +1802,10 @@ Parameters: <JSON参数>
         has_route = bool(origin and dest)
         has_purchase = bool(re.search(r"购买|下单|外卖|加入购物车|结算|支付", instruction))
         has_play = bool(re.search(r"播放|打开.*视频|第\s*[一二三四五六七八九十\d]+\s*[集期]|下载列表|我的下载", instruction))
+        store_target, product_target = _extract_purchase_targets(instruction)
+        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
+        store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
+        product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
 
         if has_route:
             if not typed:
@@ -1520,6 +1833,12 @@ Parameters: <JSON参数>
             return "找到搜索入口或搜索框"
 
         if has_purchase:
+            if store_target and not store_typed:
+                return "先搜索并打开目标店铺，再处理商品和结算"
+            if product_target and store_typed and not product_typed:
+                return "已定位店铺，下一步优先点击店内搜索/商品搜索框或直接选择目标商品"
+            if product_target and product_typed:
+                return "已定位商品，下一步选择规格、加购、结算并使用默认地址"
             if typed:
                 return "根据当前商品/店铺结果继续选择规格、加入购物车或结算"
             return "进入购买/外卖流程并定位目标店铺或商品"
@@ -1592,6 +1911,7 @@ Parameters: <JSON参数>
 - 点击操作要精确定位到目标元素的中心位置
 - TYPE操作只在输入框已经获得焦点（有光标闪烁、键盘弹出或明显处于可输入状态）时使用；如果还在寻找评价/评论入口、评分区域或输入框，应先CLICK对应可见目标，不要提前TYPE
 - 评价/评论/晒单/追评类任务通常需要依次进入入口、选择评分或点开输入区域、再输入文字；在未看到输入焦点前，优先点击带文字的按钮/标签/星级/输入框，避免点商品图、卡片正文或空白中心
+- 购买/外卖/下单任务通常要分清店铺目标和商品目标：进入店铺后，如果还没定位具体商品，优先点击店内搜索/放大镜/商品搜索框、目标商品名、规格或加号，不要先随意滚动
 - 如果当前页面有弹窗、筛选面板、对话框等浮层，必须先点击"确定"/"确认"/"完成"按钮关闭浮层，不要直接输出COMPLETE
 - 如果历史操作中有标记为[执行失败]的步骤，说明该操作未生效，需要换一种方式完成
 - 决策时先识别截图中与任务类型最相关的文字、图标、标签或按钮，再给出动作；不要只按屏幕几何中心泛化点击
