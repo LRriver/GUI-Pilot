@@ -254,6 +254,7 @@ class Agent(BaseAgent):
             self._model_critic_max_calls = max(0, min(4, int(os.environ.get("MOON_MODEL_CRITIC_MAX", "3"))))
         except ValueError:
             self._model_critic_max_calls = 3
+        self._coord_guide = os.environ.get("MOON_COORD_GUIDE", "1").lower() not in {"0", "false", "no"}
 
     def reset(self):
         """Reset agent state between test cases."""
@@ -1295,9 +1296,42 @@ Parameters: <JSON参数>
             image = image.copy()
         image = _ImageEnhance.Contrast(image).enhance(1.06)
         image = _ImageEnhance.Sharpness(image).enhance(1.25)
+        if self._coord_guide:
+            image = self._draw_coordinate_guides(image)
         image.save(buffered, format="JPEG", quality=quality)
         base64_str = _b64.b64encode(buffered.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{base64_str}"
+
+    def _draw_coordinate_guides(self, image):
+        """Overlay faint normalized coordinate guides for VLM grounding."""
+        from PIL import Image as _Image
+        from PIL import ImageDraw as _ImageDraw
+
+        base = image.convert("RGBA")
+        width, height = base.size
+        overlay = _Image.new("RGBA", base.size, (0, 0, 0, 0))
+        draw = _ImageDraw.Draw(overlay)
+        guide_color = (0, 170, 255, 36)
+        label_color = (0, 120, 255, 150)
+        label_bg = (255, 255, 255, 130)
+
+        for value in (250, 500, 750):
+            x = int(round(width * value / 1000))
+            y = int(round(height * value / 1000))
+            draw.line([(x, 0), (x, height)], fill=guide_color, width=1)
+            draw.line([(0, y), (width, y)], fill=guide_color, width=1)
+
+        for value in (0, 250, 500, 750, 1000):
+            x = int(round(width * value / 1000))
+            y = int(round(height * value / 1000))
+            tx = max(0, min(width - 30, x - 12))
+            ty = max(0, min(height - 14, y - 7))
+            draw.rectangle([tx - 1, 2, tx + 29, 13], fill=label_bg)
+            draw.text((tx, 2), str(value), fill=label_color)
+            draw.rectangle([2, ty - 1, 31, ty + 10], fill=label_bg)
+            draw.text((3, ty), str(value), fill=label_color)
+
+        return _Image.alpha_composite(base, overlay).convert("RGB")
 
     def _format_history(self, history_actions: List[Dict[str, Any]]) -> str:
         """Format history combining self-built reasoning with is_valid feedback."""
@@ -1506,6 +1540,9 @@ Parameters: <JSON参数>
 
         task_block = f"## 任务理解\n{task_brief}" if task_brief else ""
         context_block = f"## 当前上下文提示\n{context_rules}" if context_rules else ""
+        coord_guide_rule = ""
+        if self._coord_guide:
+            coord_guide_rule = "- 截图上的淡蓝线和边缘数字是归一化坐标参考，不是应用控件；点击仍使用[0,1000]坐标。\n"
         if variant == "critic":
             variant_block = """## 候选策略
 这是并发候选B。请故意从“可见控件和任务阶段”重新判断一次，不要沿用第一个直觉：
@@ -1558,9 +1595,11 @@ Parameters: <JSON参数>
 - 如果当前页面有弹窗、筛选面板、对话框等浮层，必须先点击"确定"/"确认"/"完成"按钮关闭浮层，不要直接输出COMPLETE
 - 如果历史操作中有标记为[执行失败]的步骤，说明该操作未生效，需要换一种方式完成
 - 决策时先识别截图中与任务类型最相关的文字、图标、标签或按钮，再给出动作；不要只按屏幕几何中心泛化点击
+- 输出坐标时优先借助可见控件位置和坐标参考，不要点击控件外侧。
 - 在 Thought 里做一次轻量自检：先写当前界面事实，再比较1-2个可能目标，最后说明为什么选择最终目标。不要在 Thought 中写额外的“Action:”字段。
 - 如果最终要点击屏幕中部列表/卡片区域，必须确认该位置本身就是可见按钮、输入框、星级或文字入口；如果只是商品图、视频封面、正文或空白，改点更明确的按钮/标签/搜索框/输入框。
 - 路线/打车/导航任务必须区分起点和终点：当前输入框提示“起点/出发地/从哪里”时输入起点；提示“终点/目的地/你要去哪儿”时输入终点。
+{coord_guide_rule.rstrip()}
 {context_block}
 
 ## 输出格式
