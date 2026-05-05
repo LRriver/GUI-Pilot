@@ -366,11 +366,7 @@ class Agent(BaseAgent):
         must_submit = re.search(rf"{SUBMIT_RE}|下单|支付", instruction)
         text_task = re.search(REVIEW_TEXT_RE, instruction)
         comment_text = _extract_comment_text(instruction)
-        app_name = _extract_app_name(instruction) or ""
         implicit_submit_app = _requires_social_text_submit(instruction)
-
-        if text_task and not must_submit and not implicit_submit_app and not app_name:
-            return None
 
         if comment_text and comment_text == typed and not must_submit and not implicit_submit_app:
             return _workflow_action(ACTION_COMPLETE, {}, "free_text_complete")
@@ -1047,7 +1043,6 @@ class Agent(BaseAgent):
 - 如果还没看到光标、键盘或激活输入框，不要 TYPE，先 CLICK 输入框。
 - 购买/外卖任务要区分店铺和商品：已进入店铺但未定位商品时，优先点击店内搜索/放大镜/目标商品/规格/加号，不要用 SCROLL 代替明确操作。
 - 如果刚输入评论/评价且用户要求发布/发送/提交，或当前是抖音/快手/视频/社交类评论评价任务，下一步点发布/发送/提交；只有纯填写文本且已填好时才可以 COMPLETE。
-- 如果刚输入评论/评价但用户指令没写清是否提交、且目标应用需要从截图识别，必须先看当前截图：有发布/发送/提交/完成/确认按钮就点击它，没有这类提交控件才 COMPLETE。
 - 只有目标结果或任务完成状态在截图上已经明确出现，才 COMPLETE。
 
 输出格式必须是：
@@ -1068,10 +1063,8 @@ Parameters: <JSON参数>
 
         typed = _typed_text(history_actions)
         last_action = _last_action(history_actions)
-        app_name = _extract_app_name(instruction) or ""
         submit_intent = bool(re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction))
         text_intent = bool(re.search(REVIEW_TEXT_RE, instruction))
-        unknown_text_submit_state = bool(typed and text_intent and not submit_intent and not app_name)
         search_intent = bool(re.search(r"搜索|查找|查询", instruction))
         content_mentions_submit = bool(re.search(r"发布|发表|发送|提交|确认|完成|保存|send|submit", content, re.IGNORECASE))
         purchase_intent = bool(re.search(r"购买|下单|外卖|加入购物车|结算|支付|点一?份", instruction))
@@ -1081,10 +1074,7 @@ Parameters: <JSON参数>
         product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
 
         if action == ACTION_COMPLETE:
-            if unknown_text_submit_state:
-                score += 1.2
-                notes.append("completion_possible_after_visual_check")
-            elif self._is_completion_reasonable(input_data):
+            if self._is_completion_reasonable(input_data):
                 score += 4.0
                 notes.append("completion_ok")
             else:
@@ -1143,7 +1133,7 @@ Parameters: <JSON参数>
                 score -= 5.0
                 notes.append("must_submit_not_complete")
 
-        if typed and text_intent and not submit_intent and not unknown_text_submit_state:
+        if typed and text_intent and not submit_intent:
             if action == ACTION_COMPLETE:
                 score += 2.0
                 notes.append("filled_text_complete")
@@ -1700,7 +1690,6 @@ Parameters: <JSON参数>
         """Build narrow state-aware rules without changing the base prompt."""
         history_actions = history_actions or []
         rules = []
-        app_name = _extract_app_name(instruction) or ""
         submit_intent = re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction)
         text_intent = re.search(REVIEW_TEXT_RE, instruction)
         search_intent = re.search(r"搜索|查找|查询", instruction)
@@ -1719,10 +1708,6 @@ Parameters: <JSON参数>
             elif search_intent:
                 rules.append(
                     "- 上一步刚输入搜索词；如果结果页尚未出现，下一步优先点击“搜索”按钮、键盘搜索键或第一条搜索建议。"
-                )
-            elif text_intent and not app_name:
-                rules.append(
-                    "- 上一步刚输入评论/评价文本，但目标应用需要从截图判断；如果当前截图有“发布/发表/发送/提交/完成/确认”等按钮或键盘发送键，下一步点击它；只有完全看不到这类提交控件且文本已保留在输入框中，才输出COMPLETE。"
                 )
             elif text_intent:
                 rules.append(
@@ -1762,15 +1747,10 @@ Parameters: <JSON参数>
         if not task_types:
             task_types.append("通用GUI操作")
 
-        explicit_app_name = _extract_app_name(instruction) or ""
-        app_name = explicit_app_name or "从截图识别"
+        app_name = _extract_app_name(instruction) or "从截图识别"
         typed = _typed_text(history_actions)
         comment_text = _extract_comment_text(instruction)
-        text_intent = bool(re.search(REVIEW_TEXT_RE, instruction))
-        if typed and text_intent and not explicit_app_name and not re.search(SUBMIT_RE, instruction):
-            submit_intent = "看截图判断"
-        else:
-            submit_intent = "是" if re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction) else "否"
+        submit_intent = "是" if re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction) else "否"
         search_keyword = _extract_search_keyword(instruction, app_name if app_name != "从截图识别" else "")
         store_target, product_target = _extract_purchase_targets(instruction)
         origin, dest = _extract_route_points(instruction)
@@ -1826,7 +1806,6 @@ Parameters: <JSON参数>
         last_action = _last_action(history_actions)
         has_search = bool(re.search(r"搜索|查找|查询|搜", instruction))
         has_text = bool(re.search(REVIEW_TEXT_RE, instruction))
-        app_name = _extract_app_name(instruction) or ""
         must_submit = bool(re.search(SUBMIT_RE, instruction) or _requires_social_text_submit(instruction))
         has_route = bool(origin and dest)
         has_purchase = bool(re.search(r"购买|下单|外卖|加入购物车|结算|支付", instruction))
@@ -1850,8 +1829,6 @@ Parameters: <JSON参数>
                 return "找到评论/评价入口，必要时点星级或输入框后再输入文本"
             if must_submit:
                 return "已输入文本，下一步点击可见的发布/发送/提交按钮"
-            if not app_name:
-                return "已输入文本，先看截图是否有发布/发送/提交按钮；有则点击，没有才完成"
             return "文本已填写，若无必须确认的浮层则可以完成"
 
         if has_search:
@@ -1942,7 +1919,6 @@ Parameters: <JSON参数>
 - 点击操作要精确定位到目标元素的中心位置
 - TYPE操作只在输入框已经获得焦点（有光标闪烁、键盘弹出或明显处于可输入状态）时使用；如果还在寻找评价/评论入口、评分区域或输入框，应先CLICK对应可见目标，不要提前TYPE
 - 评价/评论/晒单/追评类任务通常需要依次进入入口、选择评分或点开输入区域、再输入文字；在未看到输入焦点前，优先点击带文字的按钮/标签/星级/输入框，避免点商品图、卡片正文或空白中心
-- 刚输入评价/评论后，如果应用需要从截图识别，不要只因文本已输入就 COMPLETE；先查找“发布/发表/发送/提交/完成/确认”等按钮或键盘发送键，有则点击，没有才完成。
 - 购买/外卖/下单任务通常要分清店铺目标和商品目标：进入店铺后，如果还没定位具体商品，优先点击店内搜索/放大镜/商品搜索框、目标商品名、规格或加号，不要先随意滚动
 - 如果当前页面有弹窗、筛选面板、对话框等浮层，必须先点击"确定"/"确认"/"完成"按钮关闭浮层，不要直接输出COMPLETE
 - 如果历史操作中有标记为[执行失败]的步骤，说明该操作未生效，需要换一种方式完成
