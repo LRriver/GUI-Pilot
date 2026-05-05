@@ -7,11 +7,9 @@ commenting, food ordering, map/travel forms).  The priors are keyed by natural
 language intent rather than case names, so unseen tasks still route to the VLM.
 """
 
+import re
 import json
 import logging
-import os
-import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional, Tuple
 
 from agent_base import (
@@ -136,19 +134,6 @@ def _infer_search_keyword(instruction: str, app_name: str) -> str:
     return ""
 
 
-def _extract_search_keyword(instruction: str, app_name: str = "") -> str:
-    """Extract a generic search target from the user instruction."""
-    keyword = _infer_search_keyword(instruction, app_name) if app_name else ""
-    if keyword:
-        return keyword
-    return _extract_first([
-        r"搜索[“\"'《]?(.+?)[”\"'》]?(?:的视频|并|，|,|。|$)",
-        r"查找[“\"'《]?(.+?)[”\"'》]?(?:并|，|,|。|$)",
-        r"查询[“\"'《]?(.+?)[”\"'》]?(?:并|，|,|。|$)",
-        r"搜[“\"'《]?(.+?)[”\"'》]?(?:并|，|,|。|$)",
-    ], instruction)
-
-
 def _extract_comment_text(instruction: str) -> str:
     """Extract requested comment/review/free-text content."""
     return _extract_first([
@@ -156,35 +141,6 @@ def _extract_comment_text(instruction: str) -> str:
         r"发布评论[：:]\s*(.+)$",
         r"输入[：:]\s*(.+)$",
     ], instruction)
-
-
-def _extract_purchase_targets(instruction: str) -> Tuple[str, str]:
-    """Extract store/product targets from purchase or food-order wording."""
-    store, product = "", ""
-    patterns = [
-        r"(?:购买|下单|点一?份|买)(.+?)店铺的(.+?)(?:，|,|。|$)",
-        r"(?:去|在)(.+?)店铺(?:购买|下单|点一?份|买)(.+?)(?:，|,|。|$)",
-        r"(?:去|在)(.+?)(?:店|店铺).*?(?:购买|下单|点一?份|买)(.+?)(?:，|,|。|$)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, instruction)
-        if match:
-            store = _clean_text(match.group(1))
-            product = _clean_text(match.group(2))
-            break
-    if not store:
-        store = _extract_first([r"(?:购买|去|在)(.+?)店铺", r"(.+?)店铺的"], instruction)
-    if not product:
-        product = _extract_first([r"店铺的(.+?)(?:，|,|。|$)", r"(?:购买|下单|点一?份|买)(.+?)(?:，|,|。|$)"], instruction)
-    return store, product
-
-
-def _extract_route_points(instruction: str) -> Tuple[str, str]:
-    """Extract route origin and destination from navigation/taxi wording."""
-    route = re.search(r"从(.+?)(?:去|到)(.+?)(?:，|,|。|$)", instruction)
-    if route:
-        return _clean_text(route.group(1)), _clean_text(route.group(2))
-    return "", ""
 
 
 def _strip_city_prefix(text: str) -> str:
@@ -222,23 +178,29 @@ def _typed_text(history_actions: List[Dict[str, Any]]) -> str:
     return ""
 
 
-def _typed_texts(history_actions: List[Dict[str, Any]]) -> List[str]:
-    """Return all prior TYPE payloads in chronological order."""
-    texts = []
-    for item in history_actions or []:
-        if item.get("action") == ACTION_TYPE:
-            params = item.get("parameters") or {}
-            text = str(params.get("text") or "")
-            if text:
-                texts.append(text)
-    return texts
-
-
 def _last_action(history_actions: List[Dict[str, Any]]) -> str:
     """Return previous action name from runner history."""
     if not history_actions:
         return ""
     return str(history_actions[-1].get("action") or "")
+
+
+def _recent_valid_click_points(history_actions: List[Dict[str, Any]], limit: int = 4) -> List[Tuple[int, int]]:
+    """Return recent valid CLICK points from runner history."""
+    points: List[Tuple[int, int]] = []
+    for item in history_actions or []:
+        if item.get("action") != ACTION_CLICK or not item.get("is_valid", True):
+            continue
+        params = item.get("parameters") or {}
+        point = params.get("point")
+        if isinstance(point, list) and len(point) == 2:
+            try:
+                points.append((int(point[0]), int(point[1])))
+            except (TypeError, ValueError):
+                continue
+    if limit > 0:
+        return points[-limit:]
+    return points
 
 
 def _workflow_action(action: str, parameters: Dict[str, Any], reason: str) -> AgentOutput:
@@ -264,18 +226,6 @@ class Agent(BaseAgent):
         self._consecutive_same_action = 0
         self._last_action_str = ""
         self._step_retries = 0
-        self._model_critic_calls = 0
-        self._disable_workflow = os.environ.get("MOON_DISABLE_WORKFLOW", "").lower() in {"1", "true", "yes"}
-        self._enable_model_critic = os.environ.get("MOON_ENABLE_MODEL_CRITIC", "1").lower() not in {"0", "false", "no"}
-        try:
-            self._candidate_count = max(1, min(2, int(os.environ.get("MOON_CANDIDATE_COUNT", "2"))))
-        except ValueError:
-            self._candidate_count = 2
-        try:
-            self._model_critic_max_calls = max(0, min(4, int(os.environ.get("MOON_MODEL_CRITIC_MAX", "3"))))
-        except ValueError:
-            self._model_critic_max_calls = 3
-        self._coord_guide = os.environ.get("MOON_COORD_GUIDE", "1").lower() not in {"0", "false", "no"}
 
     def reset(self):
         """Reset agent state between test cases."""
@@ -285,15 +235,11 @@ class Agent(BaseAgent):
         self._consecutive_same_action = 0
         self._last_action_str = ""
         self._step_retries = 0
-        self._model_critic_calls = 0
 
     def act(self, input_data: AgentInput) -> AgentOutput:
         """Main entry point: decide action based on current state."""
         instruction = input_data.instruction
         step = input_data.step_count
-
-        if step == 1 and not input_data.history_actions:
-            self.reset()
 
         # Step 1: Home screen - detect app to open
         if step == 1:
@@ -311,21 +257,20 @@ class Agent(BaseAgent):
                     usage=UsageInfo()
                 )
 
-        if not self._disable_workflow:
-            completion = self._maybe_complete_after_text_input(input_data)
-            if completion:
-                self._remember(step, completion.action, completion.parameters, "文本输入目标已完成")
-                return completion
+        completion = self._maybe_complete_after_text_input(input_data)
+        if completion:
+            self._remember(step, completion.action, completion.parameters, "文本输入目标已完成")
+            return completion
 
-            submit_done = self._maybe_complete_after_submit_click(input_data)
-            if submit_done:
-                self._remember(step, submit_done.action, submit_done.parameters, "发布/提交点击后目标已完成")
-                return submit_done
+        submit_done = self._maybe_complete_after_submit_click(input_data)
+        if submit_done:
+            self._remember(step, submit_done.action, submit_done.parameters, "发布/提交点击后目标已完成")
+            return submit_done
 
-            scripted = self._workflow_prior(input_data)
-            if scripted:
-                self._remember(step, scripted.action, scripted.parameters, scripted.raw_output)
-                return scripted
+        scripted = self._workflow_prior(input_data)
+        if scripted:
+            self._remember(step, scripted.action, scripted.parameters, scripted.raw_output)
+            return scripted
 
         # Step 2+: Use VLM for decision
         return self._vlm_decide(input_data)
@@ -360,6 +305,10 @@ class Agent(BaseAgent):
         text_task = re.search(REVIEW_TEXT_RE, instruction)
         comment_text = _extract_comment_text(instruction)
 
+        implicit_submit = self._maybe_implicit_submit_after_text(input_data, typed, bool(text_task), bool(must_submit))
+        if implicit_submit:
+            return implicit_submit
+
         if comment_text and comment_text == typed and not must_submit:
             return _workflow_action(ACTION_COMPLETE, {}, "free_text_complete")
 
@@ -367,6 +316,90 @@ class Agent(BaseAgent):
             return _workflow_action(ACTION_COMPLETE, {}, "review_text_complete")
 
         return None
+
+    def _maybe_implicit_submit_after_text(
+        self,
+        input_data: AgentInput,
+        typed: str,
+        text_task: bool,
+        must_submit: bool,
+    ) -> Optional[AgentOutput]:
+        """Ask a tiny classifier only for rating-like text flows with implicit submit."""
+        if must_submit or not text_task or len(typed) < 6:
+            return None
+
+        history_actions = input_data.history_actions or []
+        if not self._looks_like_rating_then_text_flow(history_actions):
+            return None
+
+        label, usage, raw = self._classify_implicit_submit_target(input_data)
+        point_map = {
+            "TOP_RIGHT": [900, 115],
+            "BOTTOM_RIGHT": [885, 915],
+            "BOTTOM_CENTER": [500, 935],
+        }
+        point = point_map.get(label)
+        if not point:
+            return None
+
+        self._total_input_tokens += usage.input_tokens
+        self._total_output_tokens += usage.output_tokens
+        return AgentOutput(
+            action=ACTION_CLICK,
+            parameters={"point": point},
+            raw_output=f"implicit_submit:{label}\n{raw}",
+            usage=usage,
+        )
+
+    def _looks_like_rating_then_text_flow(self, history_actions: List[Dict[str, Any]]) -> bool:
+        """Detect pages that likely need a final send/submit after text input."""
+        if _last_action(history_actions) != ACTION_TYPE:
+            return False
+
+        clicks = _recent_valid_click_points(history_actions[:-1], limit=5)
+        if len(clicks) < 2:
+            return False
+
+        saw_top_selector = False
+        for _, y in clicks:
+            if y <= 220:
+                saw_top_selector = True
+                continue
+            if saw_top_selector and 260 <= y <= 650:
+                return True
+        return False
+
+    def _classify_implicit_submit_target(self, input_data: AgentInput) -> Tuple[str, UsageInfo, str]:
+        """Use a tiny VLM call to classify the likely hidden submit button zone."""
+        image_url = self._encode_image_jpeg(input_data.current_image)
+        instruction = input_data.instruction
+        prompt = (
+            "用户已经完成文本输入。请只判断下一步是否还需要点发布/发送/提交按钮，以及按钮的大致位置。"
+            "只能返回一个标签：TOP_RIGHT、BOTTOM_RIGHT、BOTTOM_CENTER、NONE。"
+            "TOP_RIGHT=右上角按钮；BOTTOM_RIGHT=右下角按钮；BOTTOM_CENTER=底部中间按钮；"
+            "NONE=无需再点，直接完成。不要解释。\n"
+            f"用户指令：{instruction}"
+        )
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ],
+        }]
+        try:
+            response = self._call_api(messages)
+            content = str(response.choices[0].message.content or "").strip()
+            usage = self.extract_usage_info(response)
+        except Exception as exc:
+            logger.warning(f"Implicit submit classifier failed: {exc}")
+            return "NONE", UsageInfo(), f"error:{exc}"
+
+        normalized = content.upper().replace("-", "_").replace(" ", "_")
+        for label in ("TOP_RIGHT", "BOTTOM_RIGHT", "BOTTOM_CENTER", "NONE"):
+            if label in normalized:
+                return label, usage, content
+        return "NONE", usage, content
 
     def _maybe_complete_after_submit_click(self, input_data: AgentInput) -> Optional[AgentOutput]:
         """Finish text-submit tasks after a valid submit/send click."""
@@ -604,26 +637,33 @@ class Agent(BaseAgent):
         step = input_data.step_count
         image = input_data.current_image
 
-        candidates = self._generate_vlm_candidates(input_data)
-        if not candidates:
+        # Build messages
+        messages = self._build_messages(instruction, image, step, input_data.history_actions)
+
+        # Call API
+        try:
+            response = self._call_api(messages)
+            content = response.choices[0].message.content
+            usage = self.extract_usage_info(response)
+            self._total_input_tokens += usage.input_tokens
+            self._total_output_tokens += usage.output_tokens
+        except Exception as e:
+            logger.error(f"API call failed: {e}")
             return AgentOutput(
                 action=ACTION_COMPLETE,
                 parameters={},
-                raw_output="Error: no valid VLM candidates",
+                raw_output=f"Error: {e}",
                 usage=UsageInfo()
             )
 
-        selected = self._select_candidate(input_data, candidates)
-        selected, critic_usage = self._maybe_model_critic_select(input_data, candidates, selected)
-        action = selected["action"]
-        params = selected["params"]
-        raw_output = selected["raw_output"]
-        usage_items = [candidate["usage"] for candidate in candidates]
-        if critic_usage:
-            usage_items.append(critic_usage)
-        usage = self._combine_usage(usage_items)
-        self._total_input_tokens += usage.input_tokens
-        self._total_output_tokens += usage.output_tokens
+        # Parse output
+        action, params = self._parse_vlm_output(content, instruction)
+        raw_output = content
+
+        submit_fix = self._postprocess_text_submit(input_data, action, params)
+        if submit_fix:
+            action, params, reason = submit_fix
+            raw_output += f"\n\n[Postprocess] {reason}"
 
         # Track repetition
         action_str = f"{action}:{json.dumps(params, ensure_ascii=False)}"
@@ -659,515 +699,6 @@ class Agent(BaseAgent):
             usage=usage
         )
 
-    def _generate_vlm_candidates(self, input_data: AgentInput) -> List[Dict[str, Any]]:
-        """Generate one or two VLM candidates. Parallel calls keep latency bounded."""
-        variants = ["primary"]
-        if self._should_parallel_sample(input_data):
-            variants.append("critic")
-        image_url = self._encode_image_jpeg(input_data.current_image)
-
-        def run_variant(variant: str) -> Optional[Dict[str, Any]]:
-            try:
-                messages = self._build_messages(
-                    input_data.instruction,
-                    input_data.current_image,
-                    input_data.step_count,
-                    input_data.history_actions,
-                    variant=variant,
-                    image_url=image_url,
-                )
-                response = self._call_api(messages)
-                content = response.choices[0].message.content
-                usage = self.extract_usage_info(response)
-                action, params = self._parse_vlm_output(content, input_data.instruction)
-                raw_output = content
-
-                submit_fix = self._postprocess_text_submit(input_data, action, params)
-                if submit_fix:
-                    action, params, reason = submit_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                repeat_text_fix = self._postprocess_repeat_text_type(input_data, action, params)
-                if repeat_text_fix:
-                    action, params, reason = repeat_text_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                purchase_done_fix = self._postprocess_purchase_complete(input_data, action, params)
-                if purchase_done_fix:
-                    action, params, reason = purchase_done_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                query_type_fix = self._postprocess_query_click_type(input_data, action, params)
-                if query_type_fix:
-                    action, params, reason = query_type_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                focus_fix = self._postprocess_search_type_focus(input_data, action, params)
-                if focus_fix:
-                    action, params, reason = focus_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                click_focus_fix = self._postprocess_search_click_focus(input_data, action, params)
-                if click_focus_fix:
-                    action, params, reason = click_focus_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                search_fix = self._postprocess_search_confirm(input_data, action, params)
-                if search_fix:
-                    action, params, reason = search_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                filter_fix = self._postprocess_filter_entry(input_data, action, params)
-                if filter_fix:
-                    action, params, reason = filter_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                video_fix = self._postprocess_video_result_click(input_data, action, params)
-                if video_fix:
-                    action, params, reason = video_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                route_fix = self._postprocess_route_type(input_data, action, params, content)
-                if route_fix:
-                    action, params, reason = route_fix
-                    raw_output += f"\n\n[Postprocess] {reason}"
-
-                return {
-                    "variant": variant,
-                    "action": action,
-                    "params": params,
-                    "content": content,
-                    "raw_output": raw_output,
-                    "usage": usage,
-                }
-            except Exception as e:
-                logger.error(f"API call failed for {variant}: {e}")
-                return None
-
-        if len(variants) == 1:
-            candidate = run_variant(variants[0])
-            return [candidate] if candidate else []
-
-        results: List[Dict[str, Any]] = []
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {executor.submit(run_variant, variant): variant for variant in variants}
-            for future in as_completed(futures):
-                candidate = future.result()
-                if candidate:
-                    results.append(candidate)
-
-        results.sort(key=lambda item: variants.index(item["variant"]))
-        return results
-
-    def _should_parallel_sample(self, input_data: AgentInput) -> bool:
-        """Use two samples on VLM fallback; workflow priors remain single-path."""
-        if self._candidate_count < 2:
-            return False
-        if input_data.step_count <= 1:
-            return False
-        return True
-
-    def _combine_usage(self, usages: List[UsageInfo]) -> UsageInfo:
-        """Aggregate token usage across parallel candidates."""
-        return UsageInfo(
-            input_tokens=sum(u.input_tokens for u in usages),
-            output_tokens=sum(u.output_tokens for u in usages),
-            total_tokens=sum(u.total_tokens for u in usages),
-            cached_tokens=sum(u.cached_tokens for u in usages),
-            reasoning_tokens=sum(u.reasoning_tokens for u in usages),
-        )
-
-    def _select_candidate(self, input_data: AgentInput, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Select the safer candidate using lightweight GUI-specific rules."""
-        if len(candidates) == 1:
-            return candidates[0]
-
-        scored = []
-        for index, candidate in enumerate(candidates):
-            score, notes = self._score_candidate(input_data, candidate)
-            scored.append((score, -index, candidate, notes))
-        scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        best_score, _, best, notes = scored[0]
-        raw_parts = []
-        for score, _, candidate, candidate_notes in scored:
-            raw_parts.append(
-                f"[{candidate['variant']} score={score:.1f} notes={','.join(candidate_notes)}]\n"
-                f"{candidate['raw_output']}"
-            )
-        best["raw_output"] = "\n\n--- Candidate Selection ---\n" + "\n\n".join(raw_parts)
-        logger.info(f"Selected VLM candidate {best['variant']} score={best_score:.1f} notes={notes}")
-        return best
-
-    def _maybe_model_critic_select(
-        self,
-        input_data: AgentInput,
-        candidates: List[Dict[str, Any]],
-        selected: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], Optional[UsageInfo]]:
-        """Ask one extra lightweight critic only when candidate disagreement is risky."""
-        if not self._should_model_critic(input_data, candidates, selected):
-            return selected, None
-
-        try:
-            prompt = self._build_model_critic_prompt(input_data, candidates, selected)
-            image_url = self._encode_image_jpeg(input_data.current_image)
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
-            }]
-            response = self._call_api(messages, temperature=0, top_p=0.7)
-            content = response.choices[0].message.content
-            usage = self.extract_usage_info(response)
-            action, params = self._parse_vlm_output(content, input_data.instruction)
-            raw_output = content
-
-            submit_fix = self._postprocess_text_submit(input_data, action, params)
-            if submit_fix:
-                action, params, reason = submit_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            repeat_text_fix = self._postprocess_repeat_text_type(input_data, action, params)
-            if repeat_text_fix:
-                action, params, reason = repeat_text_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            purchase_done_fix = self._postprocess_purchase_complete(input_data, action, params)
-            if purchase_done_fix:
-                action, params, reason = purchase_done_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            query_type_fix = self._postprocess_query_click_type(input_data, action, params)
-            if query_type_fix:
-                action, params, reason = query_type_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            focus_fix = self._postprocess_search_type_focus(input_data, action, params)
-            if focus_fix:
-                action, params, reason = focus_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            click_focus_fix = self._postprocess_search_click_focus(input_data, action, params)
-            if click_focus_fix:
-                action, params, reason = click_focus_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            search_fix = self._postprocess_search_confirm(input_data, action, params)
-            if search_fix:
-                action, params, reason = search_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            filter_fix = self._postprocess_filter_entry(input_data, action, params)
-            if filter_fix:
-                action, params, reason = filter_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            video_fix = self._postprocess_video_result_click(input_data, action, params)
-            if video_fix:
-                action, params, reason = video_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            route_fix = self._postprocess_route_type(input_data, action, params, content)
-            if route_fix:
-                action, params, reason = route_fix
-                raw_output += f"\n\n[Postprocess] {reason}"
-
-            critic_candidate = {
-                "variant": "model_critic",
-                "action": action,
-                "params": params,
-                "content": content,
-                "raw_output": raw_output,
-                "usage": usage,
-            }
-            final = self._choose_after_model_critic(input_data, selected, critic_candidate)
-            self._model_critic_calls += 1
-            return final, usage
-        except Exception as exc:
-            logger.warning("model critic failed, keeping heuristic candidate: %s", exc)
-            return selected, None
-
-    def _should_model_critic(
-        self,
-        input_data: AgentInput,
-        candidates: List[Dict[str, Any]],
-        selected: Dict[str, Any],
-    ) -> bool:
-        """Gate the extra critic to high-uncertainty VLM fallback steps."""
-        if not self._enable_model_critic:
-            return False
-        if self._model_critic_calls >= self._model_critic_max_calls:
-            return False
-        if len(candidates) < 2 or input_data.step_count <= 1:
-            return False
-
-        signatures = {self._candidate_signature(item) for item in candidates}
-        if len(signatures) <= 1:
-            return False
-
-        scored = sorted(
-            (self._score_candidate(input_data, item)[0], index, item)
-            for index, item in enumerate(candidates)
-        )
-        best_score = scored[-1][0]
-        second_score = scored[-2][0] if len(scored) >= 2 else best_score
-        selected_score, selected_notes = self._score_candidate(input_data, selected)
-        instruction = input_data.instruction
-        last_action = _last_action(input_data.history_actions or [])
-        high_risk_task = bool(re.search(
-            r"搜索|查找|查询|播放|收藏|喜欢|筛选|购买|下单|外卖|打车|导航|路线|航班|酒店|评论|评价|发布|发送",
-            instruction,
-        ))
-
-        if last_action == ACTION_TYPE:
-            return True
-        if selected["action"] == ACTION_COMPLETE and "completion_early" in selected_notes:
-            return True
-        if any((item["action"] == ACTION_COMPLETE) != (selected["action"] == ACTION_COMPLETE) for item in candidates):
-            return True
-        if high_risk_task and (best_score - second_score) < 1.5:
-            return True
-        if high_risk_task and selected_score < 1.0:
-            return True
-        if (input_data.history_actions or []) and input_data.history_actions[-1].get("is_valid") is False:
-            return True
-        return False
-
-    def _choose_after_model_critic(
-        self,
-        input_data: AgentInput,
-        selected: Dict[str, Any],
-        critic_candidate: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Keep the original candidate unless the critic is materially safer."""
-        selected_score, selected_notes = self._score_candidate(input_data, selected)
-        critic_score, critic_notes = self._score_candidate(input_data, critic_candidate)
-        last_action = _last_action(input_data.history_actions or [])
-        selected_sig = self._candidate_signature(selected)
-        critic_sig = self._candidate_signature(critic_candidate)
-        accept = False
-
-        if critic_score >= selected_score + 1.0:
-            accept = True
-        elif selected_score < 0 and critic_score >= selected_score:
-            accept = True
-        elif last_action == ACTION_TYPE and critic_sig != selected_sig and critic_score >= selected_score - 0.5:
-            accept = True
-
-        raw = (
-            f"\n\n--- Model Critic ---\n"
-            f"[selected score={selected_score:.1f} notes={','.join(selected_notes)} sig={selected_sig}]\n"
-            f"[critic score={critic_score:.1f} notes={','.join(critic_notes)} sig={critic_sig} accepted={accept}]\n"
-            f"{critic_candidate['raw_output']}"
-        )
-        if accept:
-            critic_candidate["raw_output"] = selected.get("raw_output", "") + raw
-            logger.info("Model critic accepted score %.1f over %.1f", critic_score, selected_score)
-            return critic_candidate
-
-        selected["raw_output"] = selected.get("raw_output", "") + raw
-        logger.info("Model critic kept heuristic score %.1f vs %.1f", selected_score, critic_score)
-        return selected
-
-    def _candidate_signature(self, candidate: Dict[str, Any]) -> str:
-        """Compact candidate signature for disagreement checks."""
-        action = candidate.get("action")
-        params = candidate.get("params") or {}
-        if action == ACTION_CLICK:
-            point = params.get("point") or []
-            if isinstance(point, list) and len(point) == 2:
-                return f"CLICK:{int(point[0]) // 80}:{int(point[1]) // 80}"
-            return "CLICK:?"
-        if action == ACTION_TYPE:
-            return f"TYPE:{_clean_text(str(params.get('text') or ''))[:12]}"
-        if action == ACTION_SCROLL:
-            return "SCROLL"
-        if action == ACTION_OPEN:
-            return f"OPEN:{params.get('app_name')}"
-        return str(action)
-
-    def _build_model_critic_prompt(
-        self,
-        input_data: AgentInput,
-        candidates: List[Dict[str, Any]],
-        selected: Dict[str, Any],
-    ) -> str:
-        """Build a compact one-image critic prompt."""
-        history_text = self._format_history(input_data.history_actions)
-        task_brief = self._build_task_brief(input_data.instruction, input_data.history_actions or [])
-        candidate_lines = []
-        for idx, item in enumerate(candidates, start=1):
-            score, notes = self._score_candidate(input_data, item)
-            thought = self._extract_thought(str(item.get("content") or item.get("raw_output") or ""))
-            candidate_lines.append(
-                f"{idx}. variant={item.get('variant')} score={score:.1f} notes={','.join(notes) or 'none'} "
-                f"action={item.get('action')} params={json.dumps(item.get('params') or {}, ensure_ascii=False)} "
-                f"thought={thought[:80]}"
-            )
-        selected_line = (
-            f"当前启发式选择: action={selected.get('action')} "
-            f"params={json.dumps(selected.get('params') or {}, ensure_ascii=False)}"
-        )
-
-        return f"""你是移动端 GUI Agent 的轻量复核器。你只在候选动作有明显风险时介入。
-
-## 用户指令
-{input_data.instruction}
-
-## 任务卡片
-{task_brief}
-
-## 最近历史
-{history_text if history_text else "无"}
-
-## 候选动作
-{chr(10).join(candidate_lines)}
-
-{selected_line}
-
-请重新观察当前截图，只输出最终动作。可以选择某个候选，也可以在候选都不合适时重写一个更安全的动作。
-
-判断原则：
-- 下一步必须推进“当前子目标”，不要跳过搜索确认、地址候选、评分/输入框、发送/发布等中间步骤。
-- 如果刚输入搜索词，优先点击搜索按钮、键盘搜索键或可见的第一条搜索建议，不要点无关筛选/范围。
-- 如果还没看到光标、键盘或激活输入框，不要 TYPE，先 CLICK 输入框。
-- 购买/外卖任务要区分店铺和商品：已进入店铺但未定位商品时，优先点击店内搜索/放大镜/目标商品/规格/加号，不要用 SCROLL 代替明确操作。
-- 如果刚输入评论/评价且用户要求发布/发送/提交，下一步点发布/发送/提交；如果用户只要求填写文本且已填好，可以 COMPLETE。
-- 只有目标结果或任务完成状态在截图上已经明确出现，才 COMPLETE。
-
-输出格式必须是：
-Thought: <一句话说明当前截图事实和选择理由>
-Action: <CLICK|TYPE|SCROLL|OPEN|COMPLETE>
-Parameters: <JSON参数>
-"""
-
-    def _score_candidate(self, input_data: AgentInput, candidate: Dict[str, Any]) -> Tuple[float, List[str]]:
-        """Score a candidate without using reference answers."""
-        instruction = input_data.instruction
-        history_actions = input_data.history_actions or []
-        action = candidate["action"]
-        params = candidate["params"] or {}
-        content = str(candidate.get("content") or "")
-        notes: List[str] = []
-        score = 0.0
-
-        typed = _typed_text(history_actions)
-        last_action = _last_action(history_actions)
-        submit_intent = bool(re.search(SUBMIT_RE, instruction))
-        text_intent = bool(re.search(REVIEW_TEXT_RE, instruction))
-        search_intent = bool(re.search(r"搜索|查找|查询", instruction))
-        content_mentions_submit = bool(re.search(r"发布|发表|发送|提交|确认|完成|保存|send|submit", content, re.IGNORECASE))
-        purchase_intent = bool(re.search(r"购买|下单|外卖|加入购物车|结算|支付|点一?份", instruction))
-        store_target, product_target = _extract_purchase_targets(instruction)
-        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
-        store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
-        product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
-
-        if action == ACTION_COMPLETE:
-            if self._is_completion_reasonable(input_data):
-                score += 4.0
-                notes.append("completion_ok")
-            else:
-                score -= 5.0
-                notes.append("completion_early")
-        elif action == ACTION_CLICK:
-            score += 1.0
-            point = params.get("point") or [500, 500]
-            if isinstance(point, list) and len(point) == 2:
-                x, y = int(point[0]), int(point[1])
-                if text_intent and not typed and 260 <= x <= 740 and 250 <= y <= 720:
-                    score -= 0.6
-                    notes.append("middle_click_caution")
-                if typed and content_mentions_submit and (y >= 820 or x >= 780):
-                    score += 3.0
-                    notes.append("visible_submit")
-                if search_intent and last_action == ACTION_TYPE and (x >= 760 or y <= 170):
-                    score += 2.5
-                    notes.append("search_confirm")
-                elif search_intent and last_action == ACTION_TYPE and y >= 360 and x < 760:
-                    score -= 2.0
-                    notes.append("search_history_caution")
-                if purchase_intent and product_target and store_typed and not product_typed and y <= 160:
-                    score += 2.0
-                    notes.append("purchase_store_search")
-        elif action == ACTION_TYPE:
-            new_text = _clean_text(str(params.get("text") or ""))
-            if last_action == ACTION_TYPE:
-                score -= 5.0
-                notes.append("repeat_type")
-            elif purchase_intent and product_target and not product_typed and (product_target in new_text or new_text in product_target):
-                score += 3.0
-                notes.append("purchase_product_query")
-            elif text_intent and not typed:
-                score += 1.5
-                notes.append("text_needed")
-            elif search_intent and not typed:
-                score += 1.0
-                notes.append("query_needed")
-        elif action == ACTION_SCROLL:
-            if text_intent and typed:
-                score -= 2.5
-                notes.append("scroll_after_text")
-            elif search_intent and last_action == ACTION_TYPE:
-                score -= 2.0
-                notes.append("scroll_after_query")
-            if purchase_intent and product_target and store_typed and not product_typed:
-                score -= 3.5
-                notes.append("scroll_before_product")
-
-        if typed and submit_intent:
-            if action == ACTION_CLICK:
-                score += 4.0
-                notes.append("must_submit_click")
-            elif action == ACTION_COMPLETE:
-                score -= 5.0
-                notes.append("must_submit_not_complete")
-
-        if typed and text_intent and not submit_intent:
-            if action == ACTION_COMPLETE:
-                score += 2.0
-                notes.append("filled_text_complete")
-            elif action == ACTION_CLICK and content_mentions_submit:
-                score += 1.5
-                notes.append("implicit_submit")
-
-        if history_actions:
-            last = history_actions[-1]
-            if last.get("is_valid") is False and action == last.get("action"):
-                last_params = last.get("parameters") or {}
-                if action != ACTION_CLICK or self._near_point(params.get("point"), last_params.get("point")):
-                    score -= 4.0
-                    notes.append("repeat_failed_action")
-
-        return score, notes
-
-    def _near_point(self, a: Any, b: Any, threshold: int = 60) -> bool:
-        """Whether two normalized points are close."""
-        if not (isinstance(a, list) and isinstance(b, list) and len(a) == 2 and len(b) == 2):
-            return False
-        return abs(int(a[0]) - int(b[0])) <= threshold and abs(int(a[1]) - int(b[1])) <= threshold
-
-    def _is_completion_reasonable(self, input_data: AgentInput) -> bool:
-        """Generic completion test, separate from deterministic workflow guards."""
-        history_actions = input_data.history_actions or []
-        instruction = input_data.instruction
-        typed = _typed_text(history_actions)
-        if not history_actions:
-            return False
-
-        submit_intent = bool(re.search(SUBMIT_RE, instruction))
-        text_intent = bool(re.search(REVIEW_TEXT_RE, instruction))
-        if typed and text_intent and not submit_intent:
-            return True
-        if len(history_actions) >= 2 and history_actions[-1].get("action") == ACTION_CLICK:
-            if self._maybe_complete_after_submit_click(input_data):
-                return True
-        if not (text_intent or re.search(r"搜索|播放|查看|购买|下单|打车|航班|收藏|筛选", instruction)):
-            return len(history_actions) >= 2
-        return False
-
     def _postprocess_text_submit(
         self,
         input_data: AgentInput,
@@ -1199,353 +730,8 @@ Parameters: <JSON参数>
             reason = "typed_review_submit_button"
         return ACTION_CLICK, {"point": point}, reason
 
-    def _postprocess_repeat_text_type(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """Prevent appending extra text after a review/comment has been typed."""
-        history_actions = input_data.history_actions or []
-        if _last_action(history_actions) != ACTION_TYPE or action != ACTION_TYPE:
-            return None
-
-        instruction = input_data.instruction
-        if not re.search(REVIEW_TEXT_RE, instruction):
-            return None
-        if re.search(r"搜索|查找|查询|路线|导航|打车|航班|酒店", instruction):
-            return None
-
-        typed = _typed_text(history_actions)
-        if not typed:
-            return None
-        must_submit = re.search(SUBMIT_RE, instruction)
-        if must_submit:
-            if re.search(r"评论|留言|回复", instruction) and not re.search(r"评价|好评|差评|晒单|追评|点评|买家秀", instruction):
-                return ACTION_CLICK, {"point": [885, 915]}, "repeat_text_submit_comment"
-            return ACTION_CLICK, {"point": [500, 935]}, "repeat_text_submit_review"
-        return ACTION_COMPLETE, {}, "repeat_text_complete"
-
-    def _postprocess_purchase_complete(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """Stop after checkout/order-ready clicks to avoid unintended payment taps."""
-        if action != ACTION_CLICK:
-            return None
-
-        instruction = input_data.instruction
-        if not re.search(r"购买|下单|外卖|加入购物车|结算|点一?份", instruction):
-            return None
-        if re.search(r"支付|付款", instruction):
-            return None
-
-        history_actions = input_data.history_actions or []
-        if _last_action(history_actions) != ACTION_CLICK:
-            return None
-        last = history_actions[-1]
-        if last.get("is_valid") is False:
-            return None
-
-        store_target, product_target = _extract_purchase_targets(instruction)
-        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
-        if product_target:
-            product_done = any(product_target in text or text in product_target for text in typed_history)
-        else:
-            product_done = bool(typed_history)
-        if not product_done:
-            return None
-
-        prev_point = (last.get("parameters") or {}).get("point") or []
-        point = (params or {}).get("point") or []
-        if not (
-            isinstance(prev_point, list) and len(prev_point) == 2
-            and isinstance(point, list) and len(point) == 2
-        ):
-            return None
-        prev_x, prev_y = int(prev_point[0]), int(prev_point[1])
-        x, y = int(point[0]), int(point[1])
-        last_was_checkout = prev_x >= 700 and prev_y >= 820
-        next_is_bottom_order = x >= 700 and y >= 820
-        if last_was_checkout and next_is_bottom_order:
-            return ACTION_COMPLETE, {}, "purchase_checkout_complete"
-        return None
-
-    def _query_target_for_stage(self, instruction: str, history_actions: List[Dict[str, Any]]) -> str:
-        """Return the next query text implied by the task and typed history."""
-        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
-        store_target, product_target = _extract_purchase_targets(instruction)
-        purchase_like = re.search(r"购买|下单|外卖|店铺|商品|点一?份", instruction)
-        if purchase_like:
-            store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
-            product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
-            if store_target and not store_typed:
-                return store_target
-            if product_target and store_typed and not product_typed:
-                return product_target
-
-        app_name = _extract_app_name(instruction) or ""
-        keyword = _extract_search_keyword(instruction, app_name)
-        if keyword and not any(keyword in text or text in keyword for text in typed_history):
-            return keyword
-        return ""
-
-    def _postprocess_query_click_type(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """Type the query when the input is already focused but the model clicks again."""
-        if action != ACTION_CLICK:
-            return None
-
-        history_actions = input_data.history_actions or []
-        if _last_action(history_actions) != ACTION_CLICK:
-            return None
-        query = self._query_target_for_stage(input_data.instruction, history_actions)
-        if not query:
-            return None
-
-        prev_point = (history_actions[-1].get("parameters") or {}).get("point") or []
-        point = (params or {}).get("point") or []
-        if not (
-            isinstance(prev_point, list) and len(prev_point) == 2
-            and isinstance(point, list) and len(point) == 2
-        ):
-            return None
-        input_point = self._search_input_point(input_data.instruction)
-        prev_focused = self._near_point(prev_point, input_point, threshold=30)
-        if not prev_focused:
-            return None
-
-        x, y = int(point[0]), int(point[1])
-        clicked_same_input = self._near_point(point, input_point, threshold=35)
-        clicked_history_or_body = y > 135 and not (x >= 760 and y <= 190)
-        if clicked_same_input or clicked_history_or_body:
-            return ACTION_TYPE, {"text": query}, "focused_query_type"
-        return None
-
-    def _postprocess_search_type_focus(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """Click the search input before typing when only the search icon was opened."""
-        if action != ACTION_TYPE:
-            return None
-        search_like = re.search(r"搜索|查找|查询|搜", input_data.instruction)
-        purchase_like = re.search(r"购买|下单|外卖|店铺|商品|点一?份", input_data.instruction)
-        if not (search_like or purchase_like):
-            return None
-
-        history_actions = input_data.history_actions or []
-        if _typed_text(history_actions):
-            return None
-        if _last_action(history_actions) != ACTION_CLICK:
-            return None
-
-        point = (history_actions[-1].get("parameters") or {}).get("point") or []
-        if not (isinstance(point, list) and len(point) == 2):
-            return None
-        x, y = int(point[0]), int(point[1])
-        if x >= 720 and y <= 180:
-            return ACTION_CLICK, {"point": self._search_input_point(input_data.instruction)}, "search_input_focus_before_type"
-        if purchase_like and y <= 180 and 80 <= x <= 900:
-            target = self._search_input_point(input_data.instruction)
-            if self._near_point(point, target, threshold=25):
-                return None
-            return ACTION_CLICK, {"point": target}, "purchase_search_input_focus_before_type"
-        return None
-
-    def _postprocess_search_click_focus(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """When a search page opens, avoid tapping history chips before entering the query."""
-        if action != ACTION_CLICK:
-            return None
-
-        instruction = input_data.instruction
-        if not re.search(r"搜索|查找|查询|搜|购买|下单|外卖|店铺|商品|点一?份|订票|订酒店|航班|播放", instruction):
-            return None
-
-        history_actions = input_data.history_actions or []
-        if _typed_text(history_actions) or _last_action(history_actions) != ACTION_CLICK:
-            return None
-
-        prev_point = (history_actions[-1].get("parameters") or {}).get("point") or []
-        point = (params or {}).get("point") or []
-        if not (
-            isinstance(prev_point, list) and len(prev_point) == 2
-            and isinstance(point, list) and len(point) == 2
-        ):
-            return None
-
-        prev_x, prev_y = int(prev_point[0]), int(prev_point[1])
-        x, y = int(point[0]), int(point[1])
-        prev_opened_search = (prev_y <= 180 and 80 <= prev_x <= 900) or (prev_x >= 720 and prev_y <= 220)
-        current_is_top_control = y <= 135 or (x >= 760 and y <= 190)
-        current_is_history_area = 135 < y <= 560
-        if prev_opened_search and current_is_history_area and not current_is_top_control:
-            return ACTION_CLICK, {"point": self._search_input_point(instruction)}, "search_input_refocus_before_query"
-        return None
-
-    def _postprocess_search_confirm(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """After typing a query, prefer executing search over tapping stale chips."""
-        history_actions = input_data.history_actions or []
-        if _last_action(history_actions) != ACTION_TYPE:
-            return None
-        if not re.search(r"搜索|查找|查询|搜", input_data.instruction):
-            return None
-        typed = _typed_text(history_actions)
-        if not typed or re.search(REVIEW_TEXT_RE, typed):
-            return None
-
-        confirm_point = self._search_confirm_point(input_data.instruction)
-        if action == ACTION_TYPE:
-            new_text = str((params or {}).get("text") or "")
-            if not new_text or _clean_text(new_text) == _clean_text(typed):
-                return ACTION_CLICK, {"point": confirm_point}, "typed_query_repeat_submit_search"
-            return None
-
-        if action != ACTION_CLICK:
-            return None
-
-        point = params.get("point") or []
-        if not (isinstance(point, list) and len(point) == 2):
-            return None
-        x, y = int(point[0]), int(point[1])
-        app_name = _extract_app_name(input_data.instruction) or ""
-        if app_name == "快手" and y < 100:
-            return ACTION_CLICK, {"point": confirm_point}, "typed_query_submit_search"
-        if x >= 760 or y <= 200:
-            return None
-        if y < 240:
-            return None
-        return ACTION_CLICK, {"point": confirm_point}, "typed_query_submit_search"
-
-    def _postprocess_filter_entry(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """Prefer the visible top-right filter entry after search results load."""
-        if action != ACTION_CLICK:
-            return None
-        if not re.search(r"筛选|过滤", input_data.instruction):
-            return None
-        history_actions = input_data.history_actions or []
-        if not _typed_text(history_actions) or _last_action(history_actions) != ACTION_CLICK:
-            return None
-        point = (params or {}).get("point") or []
-        if not (isinstance(point, list) and len(point) == 2):
-            return None
-        x, y = int(point[0]), int(point[1])
-        if x >= 850 and 80 <= y <= 180:
-            return None
-        if y <= 220:
-            return ACTION_CLICK, {"point": [935, 122]}, "filter_entry_top_right"
-        return None
-
-    def _postprocess_video_result_click(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any]
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """Adjust Tencent result-card clicks from the cover/body to the title/play row."""
-        if action != ACTION_CLICK:
-            return None
-        app_name = _extract_app_name(input_data.instruction) or ""
-        if app_name != "腾讯视频":
-            return None
-        if not re.search(r"搜索|播放|打开.*视频|第\s*[一二三四五六七八九十\d]+\s*[集期]", input_data.instruction):
-            return None
-        history_actions = input_data.history_actions or []
-        if not _typed_text(history_actions) or _last_action(history_actions) != ACTION_CLICK:
-            return None
-        point = (params or {}).get("point") or []
-        if not (isinstance(point, list) and len(point) == 2):
-            return None
-        x, y = int(point[0]), int(point[1])
-        if 60 <= x <= 650 and 420 <= y <= 540:
-            return ACTION_CLICK, {"point": [x, 390]}, "video_result_click_upper_row"
-        return None
-
-    def _search_confirm_point(self, instruction: str) -> List[int]:
-        """Return a conservative normalized point for the visible search action."""
-        app_name = _extract_app_name(instruction) or ""
-        if app_name == "抖音":
-            return [900, 80]
-        if app_name == "快手":
-            return [500, 130]
-        return [850, 125]
-
-    def _search_input_point(self, instruction: str) -> List[int]:
-        """Return a conservative normalized point for the top search input."""
-        app_name = _extract_app_name(instruction) or ""
-        if app_name in {"抖音", "快手"}:
-            return [320, 80]
-        if app_name in {"美团", "饿了么", "大众点评"}:
-            return [420, 75]
-        return [420, 80]
-
-    def _postprocess_route_type(
-        self,
-        input_data: AgentInput,
-        action: str,
-        params: Dict[str, Any],
-        content: str
-    ) -> Optional[Tuple[str, Dict[str, Any], str]]:
-        """Correct origin/destination text when the model identified the active field."""
-        if action != ACTION_TYPE:
-            return None
-        origin, dest = _extract_route_points(input_data.instruction)
-        if not origin or not dest:
-            return None
-        current_text = str((params or {}).get("text") or "")
-        if not current_text:
-            return None
-
-        typed_history = [_clean_text(t) for t in _typed_texts(input_data.history_actions or [])]
-        current_clean = _clean_text(current_text)
-        origin_clean = _clean_text(origin)
-        dest_clean = _clean_text(dest)
-
-        thought = str(content or "")
-        if re.search(r"起点|出发地|从哪里|输入起", thought):
-            if current_text != origin:
-                return ACTION_TYPE, {"text": origin}, "route_origin_text"
-            return None
-        if re.search(r"终点|目的地|去哪|输入终|到达地", thought):
-            if current_text != dest:
-                return ACTION_TYPE, {"text": dest}, "route_destination_text"
-            return None
-        if re.search(r"打车|叫车|用车|上车", input_data.instruction):
-            if not typed_history and current_clean == origin_clean:
-                return ACTION_TYPE, {"text": dest}, "taxi_first_field_destination_text"
-        if origin_clean in typed_history and current_clean == origin_clean and dest_clean not in typed_history:
-            return ACTION_TYPE, {"text": dest}, "route_next_destination_text"
-        if dest_clean in typed_history and current_clean == dest_clean and origin_clean not in typed_history:
-            return ACTION_TYPE, {"text": origin}, "route_next_origin_text"
-        return None
-
     def _build_messages(self, instruction: str, image, step: int,
-                        history_actions: List[Dict[str, Any]],
-                        variant: str = "primary",
-                        image_url: Optional[str] = None) -> List[Dict[str, Any]]:
+                        history_actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Build messages for the VLM API call."""
         # Build history with is_valid feedback
         history_text = self._format_history(history_actions)
@@ -1554,12 +740,11 @@ Parameters: <JSON参数>
         # Keep the general VLM prompt close to v6, and add only narrow
         # state-aware hints when the last action makes the next step obvious.
         context_rules = self._build_context_rules(instruction, history_actions)
-        system_prompt = self._build_prompt(instruction, step, history_text, context_rules, task_brief, variant)
+        system_prompt = self._build_prompt(instruction, step, history_text, context_rules, task_brief)
 
         # Encode current screenshot with mild enhancement.  This keeps package
         # size tiny while improving small text and button boundaries for VLM.
-        if image_url is None:
-            image_url = self._encode_image_jpeg(image)
+        image_url = self._encode_image_jpeg(image)
 
         messages = [{
             "role": "user",
@@ -1583,42 +768,9 @@ Parameters: <JSON参数>
             image = image.copy()
         image = _ImageEnhance.Contrast(image).enhance(1.06)
         image = _ImageEnhance.Sharpness(image).enhance(1.25)
-        if self._coord_guide:
-            image = self._draw_coordinate_guides(image)
         image.save(buffered, format="JPEG", quality=quality)
         base64_str = _b64.b64encode(buffered.getvalue()).decode("utf-8")
         return f"data:image/jpeg;base64,{base64_str}"
-
-    def _draw_coordinate_guides(self, image):
-        """Overlay faint normalized coordinate guides for VLM grounding."""
-        from PIL import Image as _Image
-        from PIL import ImageDraw as _ImageDraw
-
-        base = image.convert("RGBA")
-        width, height = base.size
-        overlay = _Image.new("RGBA", base.size, (0, 0, 0, 0))
-        draw = _ImageDraw.Draw(overlay)
-        guide_color = (0, 170, 255, 36)
-        label_color = (0, 120, 255, 150)
-        label_bg = (255, 255, 255, 130)
-
-        for value in (250, 500, 750):
-            x = int(round(width * value / 1000))
-            y = int(round(height * value / 1000))
-            draw.line([(x, 0), (x, height)], fill=guide_color, width=1)
-            draw.line([(0, y), (width, y)], fill=guide_color, width=1)
-
-        for value in (0, 250, 500, 750, 1000):
-            x = int(round(width * value / 1000))
-            y = int(round(height * value / 1000))
-            tx = max(0, min(width - 30, x - 12))
-            ty = max(0, min(height - 14, y - 7))
-            draw.rectangle([tx - 1, 2, tx + 29, 13], fill=label_bg)
-            draw.text((tx, 2), str(value), fill=label_color)
-            draw.rectangle([2, ty - 1, 31, ty + 10], fill=label_bg)
-            draw.text((3, ty), str(value), fill=label_color)
-
-        return _Image.alpha_composite(base, overlay).convert("RGB")
 
     def _format_history(self, history_actions: List[Dict[str, Any]]) -> str:
         """Format history combining self-built reasoning with is_valid feedback."""
@@ -1685,11 +837,6 @@ Parameters: <JSON参数>
         submit_intent = re.search(SUBMIT_RE, instruction)
         text_intent = re.search(REVIEW_TEXT_RE, instruction)
         search_intent = re.search(r"搜索|查找|查询", instruction)
-        purchase_intent = re.search(r"购买|下单|外卖|加入购物车|结算|支付|点一?份", instruction)
-        store_target, product_target = _extract_purchase_targets(instruction)
-        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
-        store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
-        product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
 
         typed = _typed_text(history_actions)
         if _last_action(history_actions) == ACTION_TYPE and typed:
@@ -1708,15 +855,6 @@ Parameters: <JSON参数>
         elif text_intent and not typed and len(history_actions) >= 2:
             rules.append(
                 "- 当前仍在进入评价/评论/留言入口的阶段；优先点击可见的“评价/评论/去评价/写评价/追评/晒单/评分/星级/输入框”等文字、顶部标签或明确按钮，不要点击列表/商品卡片的空白中心，也不要在未看到光标或键盘时提前TYPE。"
-            )
-
-        if purchase_intent and product_target and store_typed and not product_typed:
-            rules.append(
-                "- 交易/外卖任务已输入过店铺但还没定位商品；若当前在店铺页，优先点击店内搜索/放大镜/商品搜索框并输入商品，或直接点可见目标商品/加号/规格，不要先滚动。"
-            )
-        elif purchase_intent and product_typed:
-            rules.append(
-                "- 交易/外卖任务已输入过商品；下一步优先点击目标商品、规格、加号、加入购物车、去结算或默认地址确认，只有目标商品不可见时才滚动。"
             )
 
         if not rules:
@@ -1743,40 +881,16 @@ Parameters: <JSON参数>
         typed = _typed_text(history_actions)
         comment_text = _extract_comment_text(instruction)
         submit_intent = "是" if re.search(SUBMIT_RE, instruction) else "否"
-        search_keyword = _extract_search_keyword(instruction, app_name if app_name != "从截图识别" else "")
-        store_target, product_target = _extract_purchase_targets(instruction)
-        origin, dest = _extract_route_points(instruction)
-        current_subgoal = self._infer_current_subgoal(
-            instruction=instruction,
-            history_actions=history_actions,
-            typed=typed,
-            search_keyword=search_keyword,
-            origin=origin,
-            dest=dest,
-        )
 
         fields = [
             f"- 任务类型: {'、'.join(task_types[:3])}",
             f"- 目标应用: {app_name}",
             f"- 是否要求发布/提交: {submit_intent}",
         ]
-        if current_subgoal:
-            fields.append(f"- 当前子目标: {current_subgoal}")
-        if search_keyword:
-            fields.append(f"- 搜索目标: {search_keyword[:32]}")
-        if store_target:
-            fields.append(f"- 店铺目标: {store_target[:32]}")
-        if product_target:
-            fields.append(f"- 商品目标: {product_target[:32]}")
-        if origin and dest:
-            fields.append(f"- 路线/打车: 起点={origin[:18]}；终点={dest[:18]}")
         if comment_text:
             fields.append(f"- 指定输入文本: {comment_text[:28]}")
         if typed:
             fields.append(f"- 最近已输入: {typed[:28]}")
-        typed_history = _typed_texts(history_actions)
-        if len(typed_history) >= 2:
-            fields.append(f"- 已输入过: {' / '.join(_clean_text(t)[:16] for t in typed_history[-3:])}")
         if re.search(r"默认地址|选第一个|第一个|综合列表里第一个", instruction):
             fields.append("- 选择偏好: 按默认/第一个候选")
         if re.search(r"最便宜|最低价", instruction):
@@ -1784,95 +898,12 @@ Parameters: <JSON参数>
 
         return "\n".join(fields)
 
-    def _infer_current_subgoal(
-        self,
-        instruction: str,
-        history_actions: List[Dict[str, Any]],
-        typed: str,
-        search_keyword: str,
-        origin: str,
-        dest: str,
-    ) -> str:
-        """Compress a plan into one current subgoal for the VLM prompt."""
-        history_actions = history_actions or []
-        last_action = _last_action(history_actions)
-        has_search = bool(re.search(r"搜索|查找|查询|搜", instruction))
-        has_text = bool(re.search(REVIEW_TEXT_RE, instruction))
-        must_submit = bool(re.search(SUBMIT_RE, instruction))
-        has_route = bool(origin and dest)
-        has_purchase = bool(re.search(r"购买|下单|外卖|加入购物车|结算|支付", instruction))
-        has_play = bool(re.search(r"播放|打开.*视频|第\s*[一二三四五六七八九十\d]+\s*[集期]|下载列表|我的下载", instruction))
-        store_target, product_target = _extract_purchase_targets(instruction)
-        typed_history = [_clean_text(text) for text in _typed_texts(history_actions)]
-        store_typed = bool(store_target and any(store_target in text or text in store_target for text in typed_history))
-        product_typed = bool(product_target and any(product_target in text or text in product_target for text in typed_history))
-
-        if has_route:
-            if not typed:
-                return "进入路线/打车流程，并根据当前输入框填写起点或终点"
-            if typed in {origin, dest} or origin in typed or dest in typed:
-                return "确认地址候选，继续补齐另一端地址或进入路线/打车确认"
-            return "修正路线地址输入，避免混淆起点和终点"
-
-        if has_text:
-            if search_keyword and not typed:
-                return "先搜索并打开目标内容，再进入评论/评价入口"
-            if not typed:
-                return "找到评论/评价入口，必要时点星级或输入框后再输入文本"
-            if must_submit:
-                return "已输入文本，下一步点击可见的发布/发送/提交按钮"
-            return "文本已填写，若无必须确认的浮层则可以完成"
-
-        if has_search:
-            if last_action == ACTION_TYPE and typed:
-                return "刚输入搜索词，下一步点击搜索按钮/键盘搜索确认"
-            if search_keyword and not typed:
-                return "找到并激活搜索框，准备输入搜索目标"
-            if typed:
-                return "查看搜索结果并打开最匹配目标"
-            return "找到搜索入口或搜索框"
-
-        if has_purchase:
-            if store_target and not store_typed:
-                return "先搜索并打开目标店铺，再处理商品和结算"
-            if product_target and store_typed and not product_typed:
-                return "已定位店铺，下一步优先点击店内搜索/商品搜索框或直接选择目标商品"
-            if product_target and product_typed:
-                return "已定位商品，下一步选择规格、加购、结算并使用默认地址"
-            if typed:
-                return "根据当前商品/店铺结果继续选择规格、加入购物车或结算"
-            return "进入购买/外卖流程并定位目标店铺或商品"
-
-        if has_play:
-            if typed:
-                return "从结果中打开目标内容，选择指定集数或播放入口"
-            return "定位目标内容入口或搜索入口"
-
-        if not history_actions:
-            return "打开目标应用或进入任务起始页面"
-        return "根据当前截图继续推进未完成目标"
-
     def _build_prompt(self, instruction: str, step: int, history_text: str,
-                      context_rules: str = "", task_brief: str = "",
-                      variant: str = "primary") -> str:
+                      context_rules: str = "", task_brief: str = "") -> str:
         """Build prompt - v6 proven structure with optional narrow hints."""
 
         task_block = f"## 任务理解\n{task_brief}" if task_brief else ""
         context_block = f"## 当前上下文提示\n{context_rules}" if context_rules else ""
-        coord_guide_rule = ""
-        if self._coord_guide:
-            coord_guide_rule = "- 截图上的淡蓝线和边缘数字是归一化坐标参考，不是应用控件；点击仍使用[0,1000]坐标。\n"
-        if variant == "critic":
-            variant_block = """## 候选策略
-这是并发候选B。请故意从“可见控件和任务阶段”重新判断一次，不要沿用第一个直觉：
-- 先判断任务已完成了哪些子目标、还缺哪一个子目标。
-- 对 CLICK，优先点带文字/图标语义的按钮、标签、输入框、星级或搜索/发送控件；少点无文字的卡片中心。
-- 对 COMPLETE，只有确认截图已经呈现目标结果，或用户只要求填写文本且文本已输入、没有显式发布/发送/提交要求时才完成。
-- 如果刚输入搜索词，下一步通常是搜索键、搜索按钮或第一条搜索建议；如果刚输入评论且要求发布，下一步通常是发送/发布按钮。
-- 路线/打车/导航任务里，看到“输入起点/出发地”就输入起点；看到“终点/目的地/你要去哪儿”就输入终点，不要把两者混用。
-"""
-        else:
-            variant_block = ""
 
         prompt = f"""你是一个移动端GUI操作助手。你需要根据用户指令和当前手机截图，决定下一步操作。
 
@@ -1880,8 +911,6 @@ Parameters: <JSON参数>
 {instruction}
 
 {task_block}
-
-{variant_block}
 
 ## 已执行操作历史
 {history_text if history_text else "无（这是第一步操作）"}
@@ -1911,15 +940,9 @@ Parameters: <JSON参数>
 - 点击操作要精确定位到目标元素的中心位置
 - TYPE操作只在输入框已经获得焦点（有光标闪烁、键盘弹出或明显处于可输入状态）时使用；如果还在寻找评价/评论入口、评分区域或输入框，应先CLICK对应可见目标，不要提前TYPE
 - 评价/评论/晒单/追评类任务通常需要依次进入入口、选择评分或点开输入区域、再输入文字；在未看到输入焦点前，优先点击带文字的按钮/标签/星级/输入框，避免点商品图、卡片正文或空白中心
-- 购买/外卖/下单任务通常要分清店铺目标和商品目标：进入店铺后，如果还没定位具体商品，优先点击店内搜索/放大镜/商品搜索框、目标商品名、规格或加号，不要先随意滚动
 - 如果当前页面有弹窗、筛选面板、对话框等浮层，必须先点击"确定"/"确认"/"完成"按钮关闭浮层，不要直接输出COMPLETE
 - 如果历史操作中有标记为[执行失败]的步骤，说明该操作未生效，需要换一种方式完成
 - 决策时先识别截图中与任务类型最相关的文字、图标、标签或按钮，再给出动作；不要只按屏幕几何中心泛化点击
-- 输出坐标时优先借助可见控件位置和坐标参考，不要点击控件外侧。
-- 在 Thought 里做一次轻量自检：先写当前界面事实，再比较1-2个可能目标，最后说明为什么选择最终目标。不要在 Thought 中写额外的“Action:”字段。
-- 如果最终要点击屏幕中部列表/卡片区域，必须确认该位置本身就是可见按钮、输入框、星级或文字入口；如果只是商品图、视频封面、正文或空白，改点更明确的按钮/标签/搜索框/输入框。
-- 路线/打车/导航任务必须区分起点和终点：当前输入框提示“起点/出发地/从哪里”时输入起点；提示“终点/目的地/你要去哪儿”时输入终点。
-{coord_guide_rule.rstrip()}
 {context_block}
 
 ## 输出格式
@@ -1970,25 +993,18 @@ Parameters: {{}}
         action = None
         params = {}
 
-        action_matches = list(re.finditer(r'Action:\s*(CLICK|TYPE|SCROLL|OPEN|COMPLETE)', content, re.IGNORECASE))
-        params_matches = list(re.finditer(r'Parameters:\s*(\{.*?\})', content, re.DOTALL))
+        action_match = re.search(r'Action:\s*(CLICK|TYPE|SCROLL|OPEN|COMPLETE)', content, re.IGNORECASE)
+        params_match = re.search(r'Parameters:\s*(\{.*?\})', content, re.DOTALL)
 
-        if action_matches:
-            action = action_matches[-1].group(1).upper()
+        if action_match:
+            action = action_match.group(1).upper()
 
-        if params_matches:
-            params_str = params_matches[-1].group(1)
+        if params_match:
             try:
-                params = json.loads(params_str)
+                params = json.loads(params_match.group(1))
             except json.JSONDecodeError:
+                params_str = params_match.group(1)
                 params = self._fix_json_params(params_str, action)
-
-        if (not action) or (action and not params and action != ACTION_COMPLETE):
-            json_action, json_params = self._parse_json_action_object(content)
-            if json_action and not action:
-                action, params = json_action, json_params
-            elif json_action == action and json_params:
-                params = json_params
 
         if not action:
             action, params = self._parse_alternative_formats(content, instruction)
@@ -2001,68 +1017,6 @@ Parameters: {{}}
             params = {}
 
         return action, params
-
-    def _parse_json_action_object(self, content: str) -> Tuple[Optional[str], Dict[str, Any]]:
-        """Parse common pure-JSON action outputs."""
-        candidates = []
-        fenced = re.search(r'```(?:json)?\s*(\{.*\})\s*```', content, re.DOTALL | re.IGNORECASE)
-        if fenced:
-            candidates.append(fenced.group(1))
-        stripped = content.strip()
-        candidates.append(stripped)
-        if "{" in content and "}" in content:
-            candidates.append(content[content.find("{"):content.rfind("}") + 1])
-
-        for blob in candidates:
-            try:
-                data = json.loads(blob)
-            except json.JSONDecodeError:
-                try:
-                    data = json.loads(blob.replace("'", '"'))
-                except json.JSONDecodeError:
-                    continue
-            if not isinstance(data, dict):
-                continue
-
-            raw_action = data.get("action") or data.get("Action") or data.get("act")
-            if not raw_action:
-                continue
-            action_text = str(raw_action).upper()
-            aliases = {
-                "TAP": ACTION_CLICK,
-                "PRESS": ACTION_CLICK,
-                "INPUT": ACTION_TYPE,
-                "SWIPE": ACTION_SCROLL,
-                "DONE": ACTION_COMPLETE,
-                "FINISH": ACTION_COMPLETE,
-            }
-            action = aliases.get(action_text, action_text)
-            if action not in {ACTION_CLICK, ACTION_TYPE, ACTION_SCROLL, ACTION_OPEN, ACTION_COMPLETE}:
-                continue
-
-            params = data.get("parameters") or data.get("Parameters") or data.get("params") or {}
-            if not isinstance(params, dict):
-                params = {}
-            if action == ACTION_CLICK and not params.get("point"):
-                point = data.get("point") or data.get("coord") or data.get("coordinate")
-                if point:
-                    params["point"] = point
-            elif action == ACTION_TYPE and not params.get("text"):
-                text = data.get("text") or data.get("content")
-                if text:
-                    params["text"] = text
-            elif action == ACTION_SCROLL:
-                if "start" in data and "end" in data:
-                    params.setdefault("start_point", data.get("start"))
-                    params.setdefault("end_point", data.get("end"))
-            elif action == ACTION_OPEN and not params.get("app_name"):
-                app = data.get("app_name") or data.get("app")
-                if app:
-                    params["app_name"] = app
-
-            return action, params
-
-        return None, {}
 
     def _parse_alternative_formats(self, content: str, instruction: str) -> Tuple[Optional[str], Dict[str, Any]]:
         """Try to parse alternative output formats."""
@@ -2109,13 +1063,6 @@ Parameters: {{}}
         open_match2 = re.search(r'open\(app_name=[\'"]([^\'"]+)[\'"]\)', content)
         if open_match2:
             return ACTION_OPEN, {"app_name": open_match2.group(1)}
-
-        if re.search(r'\bENTER\b|回车|键盘搜索|键盘发送|按下搜索|按下发送', content, re.IGNORECASE):
-            if re.search(REVIEW_TEXT_RE, instruction):
-                return ACTION_CLICK, {"point": [885, 915]}
-            if re.search(r"搜索|查找|查询|播放|观看|收听", instruction):
-                return ACTION_CLICK, {"point": [900, 80]}
-            return ACTION_CLICK, {"point": [900, 80]}
 
         if re.search(r'COMPLETE', content, re.IGNORECASE):
             return ACTION_COMPLETE, {}
