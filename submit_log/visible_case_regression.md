@@ -8,12 +8,14 @@ Observed from:
 
 - `submit_log/v7c_log.md`
 - `submit_log/v9_log.md`
+- `submit_log/v9_2_log.md`
 - `submit_log/v10_log_1.md`
 - `submit_log/v10_log_2.md`
 - `submit_log/v11e_joint_log.md`
 - `submit_log/v11e_vlmonly_log.md`
 - `submit_log/v11_f_log.md`
 - `submit_log/v11_g_log.md`
+- `submit_log/v12a_log.md`
 
 ### Family A: LP review fill, then complete
 
@@ -54,6 +56,7 @@ Observed failure modes:
 - `v7c`: fails too early at step 3
 - `v9`/`v10`/`v11e`/`v11f`: reaches `TYPE`, then wrongly `COMPLETE`
 - `v11g`: tries to click after `TYPE`, but click is unconstrained and wrong (`[95,970]`)
+- `v12a`: reaches `TYPE`, then still returns local zero-token `COMPLETE`; the implicit-submit guard did not trigger online.
 
 Safe design conclusion:
 
@@ -73,6 +76,68 @@ Safe design conclusion:
    - `BOTTOM_RIGHT`
    - `BOTTOM_CENTER`
    - `NONE`
+4. Online runner history may be thinner than local runner history. For trajectory-based guards, combine `history_actions` with this agent's own compact `_history`.
+
+## Broader Case-Family Backlog
+
+These families are visible from online logs and local datasets, but are not all fully covered by the current regression table yet.
+
+### Video search / playback / comment
+
+Examples:
+
+- `step_aiqiyi_onekey_0011`
+- local `step_bilibili_onekey_0008`
+- local `step_tengxunshipin_onekey_0005`
+- local `step_mangguo_onekey_0008`
+- local `step_ximalaya_onekey_0001`
+
+Current status:
+
+- Local workflows are stable.
+- Online visible logs show `step_aiqiyi_onekey_0011` uses zero-token workflow steps and reaches at least the comment-send path.
+- Need keep these workflows isolated from generic VLM fallback changes.
+
+### Map / taxi / route
+
+Examples:
+
+- local `step_baidumap_onekey_0008`
+- local `step_baidumap_onekey_0010`
+
+Current status:
+
+- Local workflows are stable.
+- Generic fallback needs strict origin/destination distinction when workflows do not match.
+
+### Food ordering / purchase
+
+Examples:
+
+- local `step_meituan_onekey_0001`
+- online e-commerce LP/SL review scenes
+
+Current status:
+
+- Local food ordering is workflow-driven and should not be affected by review-postsubmit guards.
+- E-commerce review scenes must preserve `TYPE -> COMPLETE`.
+
+### Flight / travel form
+
+Examples:
+
+- local `step_quonekey_0030`
+
+Current status:
+
+- Local workflow is stable.
+- Future hidden cases likely need form-state tracking: origin, destination, date, sorting/price visibility.
+
+## Immediate improvement candidates
+
+1. Fix `douyin_lp_scene_0` with a narrow post-`TYPE` implicit-submit path that can still trigger when online `history_actions` only exposes the last action.
+2. Do not reintroduce candidate/critic chains until a small A/B shows a family-level gain; broad heavy chains previously degraded online scores.
+3. For each new online log, add one row to this file before changing prompts or workflows.
 
 ## Why this matters
 

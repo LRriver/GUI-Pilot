@@ -358,6 +358,8 @@ class Agent(BaseAgent):
 
         clicks = _recent_valid_click_points(history_actions[:-1], limit=5)
         if len(clicks) < 2:
+            clicks = self._recent_self_click_points(limit=5)
+        if len(clicks) < 2:
             return False
 
         saw_top_selector = False
@@ -368,6 +370,18 @@ class Agent(BaseAgent):
             if saw_top_selector and 260 <= y <= 650:
                 return True
         return False
+
+    def _recent_self_click_points(self, limit: int = 5) -> List[Tuple[int, int]]:
+        """Recover recent CLICK points from this agent's compact history."""
+        points: List[Tuple[int, int]] = []
+        for item in self._history:
+            action = str(item.get("action") or "")
+            if not action.startswith(f"{ACTION_CLICK}("):
+                continue
+            match = re.search(r'"point"\s*:\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]', action)
+            if match:
+                points.append((int(match.group(1)), int(match.group(2))))
+        return points[-limit:] if limit > 0 else points
 
     def _classify_implicit_submit_target(self, input_data: AgentInput) -> Tuple[str, UsageInfo, str]:
         """Use a tiny VLM call to classify the likely hidden submit button zone."""
