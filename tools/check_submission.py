@@ -214,7 +214,7 @@ def check_pip_download(submission_dir: pathlib.Path, timeout: int, errors: list[
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--submission-dir", default="submission")
+    parser.add_argument("--submission-dir", default="examples/competition_submission")
     parser.add_argument("--zip", dest="zip_path", required=True)
     parser.add_argument("--check-pip-download", action="store_true")
     parser.add_argument("--pip-timeout", type=int, default=60)

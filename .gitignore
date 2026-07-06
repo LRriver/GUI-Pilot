@@ -28,10 +28,11 @@ htmlcov/
 
 # Local datasets, generated outputs, and archived submission packages.
 *.zip
-code-for-student/test_data/
-code-for-student/output*/
-code-for-student/**/output*/
-submit_version/*.zip
+examples/official_runner/test_data/
+examples/official_runner/output*/
+examples/official_runner/**/output*/
+examples/competition_submission/output*/
+submission_local.zip
 
 # Large third-party reference projects kept for reading, not versioning here.
 refer_pro/
