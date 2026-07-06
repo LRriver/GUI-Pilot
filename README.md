@@ -55,6 +55,9 @@ Run the submission structure check:
 
 ```bash
 conda activate moon_zx
+cd submission
+zip -qr ../submit_version/submission_local.zip doc src
+cd ..
 python tools/check_submission.py --submission-dir submission --zip submit_version/submission_local.zip
 ```
 

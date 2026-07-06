@@ -1,12 +1,32 @@
 .DS_Store
 .env
+.envrc
+.venv/
+env/
+venv/
+ENV/
 .claude/
+.vscode/
+.idea/
+
 __pycache__/
-*.py[cod]
+*.py[codz]
 *.pyo
+*$py.class
+*.so
+
+# Build, package, and test artifacts.
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 *.log
 
-# Local datasets, generated outputs, and archived packages.
+# Local datasets, generated outputs, and archived submission packages.
 *.zip
 code-for-student/test_data/
 code-for-student/output*/
@@ -15,9 +35,3 @@ submit_version/*.zip
 
 # Large third-party reference projects kept for reading, not versioning here.
 refer_pro/
-
-# Common local caches.
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.egg-info/
