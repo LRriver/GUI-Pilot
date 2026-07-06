@@ -1,6 +1,6 @@
-# Kept Submission Packages
+# Local Submission Package Notes
 
-Minimal retained set after cleanup.
+Zip packages are intentionally ignored by Git to keep this repository small and source-focused. Locally, the minimal retained package set after cleanup was:
 
 | Package | Known online score | Reason |
 | --- | ---: | --- |
@@ -22,3 +22,5 @@ Local test output retained:
 Original/local test data retained:
 
 - `code-for-student/test_data`
+
+When cloning from GitHub, regenerate package zips from `submission/` with `tools/check_submission.py`.

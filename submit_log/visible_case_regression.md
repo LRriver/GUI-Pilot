@@ -8,14 +8,9 @@ Observed from:
 
 - `submit_log/v7c_log.md`
 - `submit_log/v9_log.md`
-- `submit_log/v9_2_log.md`
-- `submit_log/v10_log_1.md`
-- `submit_log/v10_log_2.md`
-- `submit_log/v11e_joint_log.md`
-- `submit_log/v11e_vlmonly_log.md`
-- `submit_log/v11_f_log.md`
-- `submit_log/v11_g_log.md`
 - `submit_log/v12a_log.md`
+
+Additional older logs were used during development but removed from the public repository to keep only representative artifacts.
 
 ### Family A: LP review fill, then complete
 
