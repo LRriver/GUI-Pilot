@@ -1,11 +1,9 @@
-"""
-Agent 基类和接口定义
+"""Core agent schema and compatibility base classes.
 
-选手通过继承 BaseAgent 类来实现自己的 Agent。
-此文件定义了 Agent 的输入输出数据结构和基类接口。
-
-【重要提示】
-提交阶段，该文件会被替换，所有修改都会被覆盖。
+This module defines the action constants, input/output dataclasses, and a
+minimal BaseAgent implementation used by GUI-Pilot and by compatible evaluation
+runners. The public package keeps the same wire format as the original runner
+while presenting it as a reusable library API.
 """
 
 from dataclasses import dataclass, field
@@ -22,10 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 # ==========================================
-#               API 调用保护相关
+#               API call protection
 # ==========================================
 
-# 禁止在 kwargs 中传入的敏感参数列表
+# Sensitive parameters that must not be overridden through kwargs.
 FORBIDDEN_KWARGS = {
     "base_url", "api_key", "model", "model_id",
     "base_url", "endpoint", "url", "host"
@@ -33,11 +31,11 @@ FORBIDDEN_KWARGS = {
 
 
 # ==========================================
-#               Token 限制异常
+#               Token limit exception
 # ==========================================
 
 class TokenLimitExceeded(Exception):
-    """Token 使用量超过限制异常"""
+    """Raised when token usage exceeds the configured limit."""
     def __init__(self, current_tokens: int, limit: int):
         self.current_tokens = current_tokens
         self.limit = limit
@@ -47,22 +45,22 @@ class TokenLimitExceeded(Exception):
 
 
 class ConfigTamperError(Exception):
-    """配置篡改异常"""
+    """Raised when managed API configuration is modified at runtime."""
     pass
 
 
 # ==========================================
-#            选手调试配置说明
+#            Local and managed runtime configuration
 # ==========================================
-# 调试阶段可设置以下环境变量自定义配置：
+# Local development can set the following environment variables:
 #   DEBUG_API_URL  - API 地址（可选，默认使用下方 DEFAULT_API_URL）
 #   DEBUG_MODEL_ID - 模型 ID（可选，默认使用下方 DEFAULT_MODEL_ID）
-#   VLM_API_KEY    - 你的 API 密钥（必须设置）
+#   VLM_API_KEY    - API key used for local development
 #
-# !!! 重要提示 !!!
-# 1. 提交时，DEBUG_* 环境变量将被忽略
-# 2. 主办方将使用统一的 EVAL_* 配置
-# 3. 任何尝试篡改配置的行为都将被检测并终止评测
+# In managed/evaluation runtime:
+# 1. DEBUG_* environment variables are ignored
+# 2. EVAL_* variables provide the runtime-managed endpoint and model
+# 3. runtime configuration changes are detected and rejected
 # ==========================================
 
 
@@ -75,16 +73,16 @@ DEFAULT_MODEL_ID = "doubao-seed-1-6-vision-250815"
 
 
 def _is_production_mode() -> bool:
-    """检查是否为提交阶段（生产模式）"""
+    """Return whether the agent is running under a managed evaluation runtime."""
     return os.environ.get("EVAL_MODE", "").lower() == "production"
 
 
 def _get_api_url() -> str:
     """
-    获取 API URL
+    Get the API URL.
     
-    - 提交阶段：强制使用 EVAL_API_URL
-    - 调试阶段：允许使用 DEBUG_API_URL，默认使用 DEFAULT_API_URL
+    - Managed runtime: use EVAL_API_URL.
+    - Local development: use DEBUG_API_URL or DEFAULT_API_URL.
     """
     if _is_production_mode():
         return os.environ.get("EVAL_API_URL", DEFAULT_API_URL)
@@ -93,8 +91,8 @@ def _get_api_url() -> str:
         if debug_url:
             warnings.warn(
                 f"\n{'='*60}\n"
-                f"[调试模式] 使用自定义 API_URL: {debug_url}\n"
-                f"注意：提交时此配置将被替换为主办方统一配置\n"
+                f"[local mode] using custom API_URL: {debug_url}\n"
+                f"note: managed runtimes can override this with EVAL_API_URL\n"
                 f"{'='*60}",
                 UserWarning
             )
@@ -103,10 +101,10 @@ def _get_api_url() -> str:
 
 def _get_model_id() -> str:
     """
-    获取模型 ID
+    Get the model ID.
     
-    - 提交阶段：强制使用 EVAL_MODEL_ID
-    - 调试阶段：优先使用 DEBUG_MODEL_ID，否则使用 DEFAULT_MODEL_ID
+    - Managed runtime: use EVAL_MODEL_ID.
+    - Local development: use DEBUG_MODEL_ID or DEFAULT_MODEL_ID.
     """
     if _is_production_mode():
         return os.environ.get("EVAL_MODEL_ID", DEFAULT_MODEL_ID)
@@ -115,8 +113,8 @@ def _get_model_id() -> str:
         if debug_model:
             warnings.warn(
                 f"\n{'='*60}\n"
-                f"[调试模式] 使用自定义 MODEL_ID: {debug_model}\n"
-                f"注意：提交时此配置将被替换为主办方统一配置\n"
+                f"[local mode] using custom MODEL_ID: {debug_model}\n"
+                f"note: managed runtimes can override this with EVAL_MODEL_ID\n"
                 f"{'='*60}",
                 UserWarning
             )
@@ -125,10 +123,10 @@ def _get_model_id() -> str:
 
 def _get_api_key() -> str:
     """
-    获取 API Key
+    Get the API key.
     
-    - 提交阶段：强制使用 EVAL_API_KEY
-    - 调试阶段：使用 VLM_API_KEY
+    - Managed runtime: use EVAL_API_KEY.
+    - Local development: use VLM_API_KEY.
     """
     if _is_production_mode():
         return os.environ.get("EVAL_API_KEY", "")
@@ -219,15 +217,15 @@ class UsageInfo:
 
 @dataclass
 class AgentInput:
-    """Agent 输入数据结构 - 支持多种参数，选手可选择性使用
+    """Agent input data structure with optional history and extension fields.
     
     Attributes:
         instruction: 用户原始指令
         current_image: 当前轮的截图
         step_count: 当前是第几次调用
-        history_messages: 历史消息列表（选手可自定义格式）
-        history_actions: 历史动作列表（选手可自定义格式）
-        extra: 选手自定义扩展参数
+        history_messages: historical messages in a caller-defined format
+        history_actions: historical actions in a caller-defined format
+        extra: caller-defined extension data
     """
     instruction: str
     current_image: Image.Image
@@ -268,19 +266,20 @@ class AgentOutput:
 
 
 class BaseAgent:
-    """Agent 基类 - 选手继承此类实现自己的 Agent
+    """Base class for agents that implement the GUI-Pilot action protocol.
 
-    选手需要：
-    1. 继承 BaseAgent
-    2. 实现 act() 方法
-    3. 可选重写 generate_messages() 方法以自定义消息生成逻辑
-    4. 可选重写 _initialize() 方法进行初始化
+    Implementations usually:
+    1. inherit BaseAgent
+    2. implement act()
+    3. optionally override generate_messages() for custom prompting
+    4. optionally override _initialize() for setup
 
-    重要：API URL 和 Model ID 已固定，选手不可修改。仅需配置 VLM_API_KEY 环境变量。
+    API URL and model ID are managed by BaseAgent. For local development, set
+    VLM_API_KEY and optionally DEBUG_API_URL / DEBUG_MODEL_ID.
     
-    调试阶段说明：
-    - 可通过 DEBUG_API_URL、DEBUG_MODEL_ID 环境变量自定义配置
-    - 提交阶段这些配置将被忽略，强制使用主办方统一配置
+    Managed runtime notes:
+    - DEBUG_* values are ignored when EVAL_MODE=production
+    - EVAL_API_URL, EVAL_MODEL_ID, and EVAL_API_KEY are used instead
     """
 
     def __init__(self, config: Dict[str, Any] = None):
@@ -296,7 +295,7 @@ class BaseAgent:
                 DEBUG_MODEL_ID: 自定义模型 ID（可选）
                 VLM_API_KEY: API 密钥（必须设置）
             
-            提交阶段（由主办方设置）：
+            Managed runtime:
                 EVAL_MODE: 设置为 "production"
                 EVAL_API_URL: 统一的 API 地址
                 EVAL_MODEL_ID: 统一的模型 ID
@@ -338,8 +337,8 @@ class BaseAgent:
         """
         API URL - 只读属性
         
-        返回值在初始化时确定，提交阶段使用主办方统一配置，
-        调试阶段可使用 DEBUG_API_URL 自定义。
+        The value is fixed at initialization. Managed runtimes use EVAL_API_URL;
+        local development can use DEBUG_API_URL.
         """
         return self._api_url
 
@@ -348,8 +347,8 @@ class BaseAgent:
         """
         Model ID - 只读属性
         
-        返回值在初始化时确定，提交阶段使用主办方统一配置，
-        调试阶段可使用 DEBUG_MODEL_ID 自定义。
+        The value is fixed at initialization. Managed runtimes use
+        EVAL_MODEL_ID; local development can use DEBUG_MODEL_ID.
         """
         return self._model_id
 
@@ -358,8 +357,8 @@ class BaseAgent:
         """
         API Key - 只读属性
         
-        返回值在初始化时确定，提交阶段使用主办方统一配置，
-        调试阶段使用 VLM_API_KEY。
+        The value is fixed at initialization. Managed runtimes use
+        EVAL_API_KEY; local development uses VLM_API_KEY.
         """
         return self._api_key
     
@@ -485,8 +484,8 @@ complete(content='xxx')
         """
         受保护的 API 调用方法
         
-        选手必须通过此方法调用大模型 API，禁止自行创建客户端或绕过此方法。
-        此方法确保 API 调用使用固定的配置（api_url, model_id, api_key）。
+        Agent implementations should call the VLM through this method when they
+        need the managed endpoint/model/key contract.
         
         Args:
             messages: 符合 OpenAI 格式的消息列表
@@ -526,7 +525,7 @@ complete(content='xxx')
                 f"检测到配置篡改！运行时签名与初始化签名不一致。\n"
                 f"初始签名: {self._config_signature}\n"
                 f"当前签名: {current_signature}\n"
-                f"评测已终止。"
+                f"API call aborted."
             )
         
         # 3. 延迟导入 OpenAI（避免未安装时报错）
@@ -608,4 +607,3 @@ complete(content='xxx')
                 usage.reasoning_tokens = details.reasoning_tokens or 0
         
         return usage
-
