@@ -2,6 +2,8 @@
 
 GUI-Pilot is an open-source mobile GUI Agent framework built around two practical execution profiles:
 
+![GUI-Pilot action preview](docs/assets/gui-pilot-preview.png)
+
 - **`lite`**: a fast, stable profile based on workflow priors, a single VLM fallback, and narrow post-action guards.
 - **`deep`**: a high-budget research profile with planning, crop proposals, candidate sampling, review, arbitration, and reflection memory.
 
