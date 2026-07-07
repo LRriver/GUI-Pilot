@@ -28,7 +28,7 @@ class DeepAgent(BaseAgent):
         self.critic = CandidateCritic()
         self.arbiter = ActionArbiter()
         self.memory = ReflectionMemory()
-        self.sampler = CandidateSampler(lambda: LiteAgent())
+        self.sampler = CandidateSampler(lambda: LiteAgent(enable_workflow_prior=self.gui_config.enable_workflow_prior))
 
     def reset(self):
         self.memory.clear()
@@ -40,13 +40,14 @@ class DeepAgent(BaseAgent):
         reviewed = [self.critic.score(input_data, candidate) for candidate in candidates]
         selected = self.arbiter.choose(reviewed)
 
-        self.memory.add(
-            step=str(input_data.step_count),
-            plan=">".join(step.name for step in plan[:6]),
-            regions=",".join(region.name for region in regions[:4]),
-            selected=selected.source,
-            action=selected.output.action,
-        )
+        if self.gui_config.enable_reflection:
+            self.memory.add(
+                step=str(input_data.step_count),
+                plan=">".join(step.name for step in plan[:6]),
+                regions=",".join(region.name for region in regions[:4]),
+                selected=selected.source,
+                action=selected.output.action,
+            )
 
         output = selected.output
         trace = {
@@ -64,6 +65,7 @@ class DeepAgent(BaseAgent):
                 for candidate in reviewed
             ],
             "selected": selected.source,
+            "reflection_enabled": self.gui_config.enable_reflection,
         }
         output.raw_output = f"{output.raw_output}\n\n[DeepTrace] {json.dumps(trace, ensure_ascii=False)}"
         return output

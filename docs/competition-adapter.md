@@ -19,7 +19,7 @@ Build and validate:
 cd examples/competition_submission
 zip -qr ../../submission_local.zip doc src
 cd ../..
-python tools/check_submission.py \
+python3 tools/check_submission.py \
   --submission-dir examples/competition_submission \
   --zip submission_local.zip
 ```

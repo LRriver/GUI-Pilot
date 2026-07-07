@@ -1,8 +1,9 @@
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
-from gui_pilot import ACTION_OPEN, AgentInput, GuiPilotAgent, GuiPilotConfig
+from gui_pilot import ACTION_CLICK, ACTION_OPEN, AgentInput, GuiPilotAgent, GuiPilotConfig, UsageInfo
 from gui_pilot.deep.arbiter import ActionArbiter
 from gui_pilot.deep.critic import CandidateCritic
 from gui_pilot.deep.cropper import VisualCropper
@@ -32,6 +33,32 @@ class GuiPilotSmokeTest(unittest.TestCase):
     def test_unknown_profile_is_rejected(self):
         with self.assertRaises(ValueError):
             GuiPilotAgent(profile="missing")
+
+    def test_workflow_prior_flag_disables_lite_workflow_path(self):
+        agent = GuiPilotAgent(config=GuiPilotConfig(profile="lite", enable_workflow_prior=False))
+        input_data = AgentInput(
+            instruction="打开爱奇艺的评论区，发布评论：真是太好看了",
+            current_image=self.make_image(),
+            step_count=2,
+        )
+        with patch.object(agent._impl, "_vlm_decide") as decide:
+            decide.return_value = AgentOutput(
+                action=ACTION_CLICK,
+                parameters={"point": [111, 222]},
+                raw_output="mock_vlm",
+                usage=UsageInfo(input_tokens=1, output_tokens=1, total_tokens=2),
+            )
+            output = agent.act(input_data)
+
+        self.assertEqual(output.action, ACTION_CLICK)
+        self.assertEqual(output.parameters, {"point": [111, 222]})
+        decide.assert_called_once()
+
+    def test_deep_reflection_flag_disables_memory_write(self):
+        agent = GuiPilotAgent(config=GuiPilotConfig(profile="deep", candidate_count=1, enable_reflection=False))
+        output = agent.act(AgentInput(instruction="打开爱奇艺", current_image=self.make_image(), step_count=1))
+        self.assertIn('"reflection_enabled": false', output.raw_output)
+        self.assertEqual(agent._impl.memory.recent(), [])
 
 
 class DeepComponentsTest(unittest.TestCase):

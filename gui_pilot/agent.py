@@ -23,13 +23,14 @@ class GuiPilotAgent(BaseAgent):
 
     def __init__(self, profile: str = "lite", config: Optional[GuiPilotConfig] = None):
         self.gui_config = config or GuiPilotConfig(profile=normalize_profile(profile))
+        self.gui_config.profile = normalize_profile(self.gui_config.profile)
         super().__init__()
 
     def _initialize(self):
         if self.gui_config.profile == "lite":
             from gui_pilot.profiles.lite import LiteAgent
 
-            self._impl = LiteAgent()
+            self._impl = LiteAgent(enable_workflow_prior=self.gui_config.enable_workflow_prior)
         elif self.gui_config.profile == "deep":
             from gui_pilot.profiles.deep import DeepAgent
 

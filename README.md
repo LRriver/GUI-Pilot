@@ -54,6 +54,8 @@ Create local credentials:
 
 ```bash
 cp .env.example .env
+# GUI-Pilot does not auto-load .env. Export variables in your shell:
+set -a; source .env; set +a
 ```
 
 The bundled `BaseAgent` uses an OpenAI-compatible vision model API. The default constants are:
@@ -89,8 +91,8 @@ agent = GuiPilotAgent(
 Runnable examples:
 
 ```bash
-python examples/quickstart_lite.py
-python examples/quickstart_deep.py
+python3 examples/quickstart_lite.py
+python3 examples/quickstart_deep.py
 ```
 
 The examples use synthetic screenshots for import and API-shape smoke tests. Real GUI execution requires a runner that supplies `AgentInput` screenshots and applies returned actions.
@@ -196,7 +198,7 @@ The old leaderboard logs are not part of the runtime. Their useful content has b
 Run unit/import tests:
 
 ```bash
-python -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v
 ```
 
 Check the competition adapter:
@@ -205,7 +207,7 @@ Check the competition adapter:
 cd examples/competition_submission
 zip -qr ../../submission_local.zip doc src
 cd ../..
-python tools/check_submission.py \
+python3 tools/check_submission.py \
   --submission-dir examples/competition_submission \
   --zip submission_local.zip
 ```

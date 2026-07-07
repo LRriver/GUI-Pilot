@@ -10,6 +10,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import zipfile
 
@@ -32,6 +33,34 @@ BLOCKED_DIR_NAMES = {
 BLOCKED_SUFFIXES = {".pyc", ".pyo", ".log"}
 LOCAL_MODULES = {"agent", "agent_base", "utils"}
 PACKAGE_MAP = {"PIL": "pillow", "cv2": "opencv-python"}
+
+
+def stdlib_module_roots() -> set[str]:
+    """Return stdlib top-level module names on Python 3.9+.
+
+    Python 3.10 added `sys.stdlib_module_names`; the fallback keeps this
+    checker usable on Python 3.9 by inspecting the active interpreter's stdlib
+    directory and builtin module list.
+    """
+    names = set(getattr(sys, "stdlib_module_names", set()) or ())
+    names.update(name.split(".", 1)[0] for name in sys.builtin_module_names)
+
+    for key in ("stdlib", "platstdlib"):
+        root = sysconfig.get_paths().get(key)
+        if not root:
+            continue
+        root_path = pathlib.Path(root)
+        if not root_path.exists():
+            continue
+        for child in root_path.iterdir():
+            name = child.name
+            if name.startswith("_"):
+                names.add(name)
+            elif child.is_file() and child.suffix == ".py":
+                names.add(child.stem)
+            elif child.is_dir() and (child / "__init__.py").exists():
+                names.add(name)
+    return names
 
 
 def fail(errors: list[str], message: str) -> None:
@@ -117,7 +146,7 @@ def check_requirements(submission_dir: pathlib.Path, errors: list[str], warnings
     src_dir = submission_dir / "src"
     declared = parse_requirements(src_dir / "requirements.txt")
     imported: set[str] = set()
-    stdlib = getattr(sys, "stdlib_module_names", set())
+    stdlib = stdlib_module_roots()
     for path in src_dir.rglob("*.py"):
         imported.update(imported_roots(path))
     third_party: set[str] = set()

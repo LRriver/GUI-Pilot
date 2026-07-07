@@ -218,6 +218,10 @@ class LiteAgent(BaseAgent):
     Lightweight GUI Pilot profile with workflow priors and VLM fallback.
     """
 
+    def __init__(self, enable_workflow_prior: bool = True):
+        self.enable_workflow_prior = enable_workflow_prior
+        super().__init__()
+
     def _initialize(self):
         """Initialize agent state."""
         self._history: List[Dict[str, str]] = []
@@ -267,7 +271,7 @@ class LiteAgent(BaseAgent):
             self._remember(step, submit_done.action, submit_done.parameters, "发布/提交点击后目标已完成")
             return submit_done
 
-        scripted = self._workflow_prior(input_data)
+        scripted = self._workflow_prior(input_data) if self.enable_workflow_prior else None
         if scripted:
             self._remember(step, scripted.action, scripted.parameters, scripted.raw_output)
             return scripted

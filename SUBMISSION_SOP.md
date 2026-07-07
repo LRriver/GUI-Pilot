@@ -8,7 +8,7 @@ This SOP applies only to `examples/competition_submission/`. The main open-sourc
 cd examples/competition_submission
 zip -qr ../../submission_local.zip doc src
 cd ../..
-python tools/check_submission.py \
+python3 tools/check_submission.py \
   --submission-dir examples/competition_submission \
   --zip submission_local.zip
 ```
@@ -26,7 +26,7 @@ This checks:
 ## Dependency Check
 
 ```bash
-python tools/check_submission.py \
+python3 tools/check_submission.py \
   --submission-dir examples/competition_submission \
   --zip submission_local.zip \
   --check-pip-download \
