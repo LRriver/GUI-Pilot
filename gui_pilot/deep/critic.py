@@ -21,9 +21,20 @@ class CandidateCritic:
 
         if output.action == ACTION_CLICK:
             point = output.parameters.get("point") or [500, 500]
-            x, y = point
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                candidate.score = score - 1.0
+                candidate.note = "invalid_click_point"
+                return candidate
+            try:
+                x, y = int(point[0]), int(point[1])
+            except (TypeError, ValueError):
+                candidate.score = score - 1.0
+                candidate.note = "invalid_click_point"
+                return candidate
             if 0 <= x <= 1000 and 0 <= y <= 1000:
                 score += 0.2
+            else:
+                score -= 0.5
             if re.search(r"搜索|发送|提交|发布|确认", instruction) and (y <= 180 or y >= 850):
                 score += 0.2
         elif output.action == ACTION_TYPE:

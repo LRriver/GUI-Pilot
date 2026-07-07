@@ -1,10 +1,15 @@
 import os
+import sys
 from openai import OpenAI
 
-# Set VLM_API_KEY in the process environment before running this script.
+api_key = os.environ.get("VLM_API_KEY")
+if not api_key:
+    sys.exit("VLM_API_KEY is required. Export it first, for example: set -a; source .env; set +a")
+
+# Live network smoke test for an OpenAI-compatible VLM endpoint.
 client = OpenAI(
     base_url=os.environ.get("DEBUG_API_URL", "https://ark.cn-beijing.volces.com/api/v3"),
-    api_key=os.environ.get("VLM_API_KEY"),
+    api_key=api_key,
 )
 
 response = client.chat.completions.create(

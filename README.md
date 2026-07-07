@@ -47,7 +47,7 @@ The default profile does not try to be an unconstrained ReAct loop. It uses VLMs
 ```bash
 git clone git@github.com:LRriver/GUI-Pilot.git
 cd GUI-Pilot
-pip install -r requirements.txt
+pip install -e .
 ```
 
 Create local credentials:
@@ -139,14 +139,14 @@ TaskPlanner
 -> ReflectionMemory
 ```
 
-The current implementation reuses `lite` as the reliable action generator, then layers high-budget reasoning components around it:
+The current implementation reuses `lite` as the reliable action generator, then layers high-budget diagnostics and arbitration around it:
 
-- `planner.py`: produces coarse subgoals from the instruction.
-- `cropper.py`: proposes stable UI regions such as top bar, content, bottom bar, and right-side action zones.
-- `sampler.py`: generates multiple action candidates.
+- `planner.py`: produces coarse subgoals for traceability.
+- `cropper.py`: proposes stable UI regions such as top bar, content, bottom bar, and right-side action zones for diagnostics.
+- `sampler.py`: generates and de-duplicates action candidates.
 - `critic.py`: scores candidates with task-stage and action-risk heuristics.
 - `arbiter.py`: chooses the best candidate deterministically.
-- `memory.py`: keeps bounded trace memory for debugging and future reflection.
+- `memory.py`: keeps bounded trace memory for debugging and future reflection; it is not yet fed back into action decisions.
 
 `deep` is intended as a research surface for adding stronger crop-conditioned VLM calls, richer review prompts, and ReAct/plan-execute loops without making the default agent fragile.
 
@@ -211,5 +211,7 @@ python3 tools/check_submission.py \
   --submission-dir examples/competition_submission \
   --zip submission_local.zip
 ```
+
+The `examples/official_runner/` tree is an archival scaffold for the original local runner. It has its own `requirements.txt`, and its test data is intentionally not tracked in this repository.
 
 Generated zips, local datasets, screenshots, outputs, and `.env` are ignored by Git.

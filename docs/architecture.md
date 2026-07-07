@@ -42,7 +42,7 @@ Instruction + screenshot
 -> ReflectionMemory
 ```
 
-`deep` is a research profile. It is designed so heavier ReAct, plan-execute, crop-conditioned VLM calls, and reviewer prompts can be added without destabilizing `lite`.
+`deep` is a research profile. In the current implementation, planning, crop proposals, and reflection memory are diagnostic trace layers around the reliable `lite` action generator; arbitration can choose among generated candidates, but crop-conditioned VLM calls and memory-fed reflection are intentionally left as extension points.
 
 ## Action Schema
 

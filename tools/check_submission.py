@@ -188,6 +188,55 @@ def run_import_checks(submission_dir: pathlib.Path, errors: list[str]) -> None:
             fail(errors, f"{name} failed: {proc.stderr.strip() or proc.stdout.strip()}")
 
 
+def run_action_smoke_check(submission_dir: pathlib.Path, errors: list[str]) -> None:
+    """Instantiate Agent and validate one synthetic action schema."""
+    src_dir = submission_dir / "src"
+    code = r'''
+from PIL import Image
+from agent import Agent
+from agent_base import AgentInput
+
+output = Agent().act(AgentInput(
+    instruction="打开爱奇艺",
+    current_image=Image.new("RGB", (1080, 2400), "white"),
+    step_count=1,
+))
+valid = {"CLICK", "SCROLL", "TYPE", "OPEN", "COMPLETE"}
+assert output.action in valid, output.action
+assert isinstance(output.parameters, dict), type(output.parameters)
+if output.action == "CLICK":
+    point = output.parameters.get("point")
+    assert isinstance(point, list) and len(point) == 2, point
+    assert all(isinstance(v, int) and 0 <= v <= 1000 for v in point), point
+elif output.action == "SCROLL":
+    for key in ("start_point", "end_point"):
+        point = output.parameters.get(key)
+        assert isinstance(point, list) and len(point) == 2, (key, point)
+        assert all(isinstance(v, int) and 0 <= v <= 1000 for v in point), (key, point)
+elif output.action == "TYPE":
+    assert isinstance(output.parameters.get("text"), str), output.parameters
+elif output.action == "OPEN":
+    assert isinstance(output.parameters.get("app_name"), str) and output.parameters.get("app_name"), output.parameters
+elif output.action == "COMPLETE":
+    assert output.parameters == {}, output.parameters
+print(output.action)
+'''
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(src_dir)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        cwd=str(src_dir),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=20,
+    )
+    if proc.returncode != 0:
+        fail(errors, f"action smoke failed: {proc.stderr.strip() or proc.stdout.strip()}")
+
+
 def check_zip(zip_path: pathlib.Path, errors: list[str]) -> None:
     if not zip_path.exists():
         fail(errors, f"zip missing: {zip_path}")
@@ -214,6 +263,14 @@ def check_zip(zip_path: pathlib.Path, errors: list[str]) -> None:
                     fail(errors, f"blocked zip file: {name}")
     except zipfile.BadZipFile as exc:
         fail(errors, f"invalid zip: {exc}")
+
+
+def extract_zip(zip_path: pathlib.Path, target_dir: pathlib.Path, errors: list[str]) -> None:
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(target_dir)
+    except zipfile.BadZipFile as exc:
+        fail(errors, f"cannot extract zip: {exc}")
 
 
 def check_pip_download(submission_dir: pathlib.Path, timeout: int, errors: list[str]) -> None:
@@ -254,14 +311,22 @@ def main() -> int:
     errors: list[str] = []
     warnings: list[str] = []
 
-    check_structure(submission_dir, errors)
-    check_blocked_artifacts(submission_dir, errors)
-    check_compile(submission_dir, errors)
-    check_requirements(submission_dir, errors, warnings)
-    run_import_checks(submission_dir, errors)
+    if not submission_dir.exists():
+        warn(warnings, f"source submission dir missing; validating zip only: {submission_dir}")
     check_zip(zip_path, errors)
-    if args.check_pip_download:
-        check_pip_download(submission_dir, args.pip_timeout, errors)
+    if not errors:
+        with tempfile.TemporaryDirectory(prefix="moon-submit-zip-") as tmp:
+            extracted_dir = pathlib.Path(tmp)
+            extract_zip(zip_path, extracted_dir, errors)
+            if not errors:
+                check_structure(extracted_dir, errors)
+                check_blocked_artifacts(extracted_dir, errors)
+                check_compile(extracted_dir, errors)
+                check_requirements(extracted_dir, errors, warnings)
+                run_import_checks(extracted_dir, errors)
+                run_action_smoke_check(extracted_dir, errors)
+                if args.check_pip_download:
+                    check_pip_download(extracted_dir, args.pip_timeout, errors)
 
     if warnings:
         print("WARNINGS:")

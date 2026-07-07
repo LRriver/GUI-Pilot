@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gui-pilot"
+version = "0.1.0"
+description = "Mobile GUI agent framework with lite and deep execution profiles."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Lriver", email = "zj_liao@yeah.net"},
+]
+dependencies = [
+    "openai>=1.0.0",
+    "pillow>=10.0.0",
+]
+keywords = ["gui-agent", "vlm", "mobile-automation", "agent"]
+
+[tool.setuptools.packages.find]
+include = ["gui_pilot*"]

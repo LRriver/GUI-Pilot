@@ -12,7 +12,7 @@ from gui_pilot.deep.memory import ReflectionMemory
 from gui_pilot.deep.planner import TaskPlanner
 from gui_pilot.deep.sampler import CandidateSampler
 from gui_pilot.profiles.lite import LiteAgent
-from gui_pilot.schema import AgentInput, AgentOutput, BaseAgent
+from gui_pilot.schema import AgentInput, AgentOutput, BaseAgent, UsageInfo
 
 
 class DeepAgent(BaseAgent):
@@ -39,6 +39,7 @@ class DeepAgent(BaseAgent):
         candidates = self.sampler.sample(input_data, self.gui_config.candidate_count)
         reviewed = [self.critic.score(input_data, candidate) for candidate in candidates]
         selected = self.arbiter.choose(reviewed)
+        total_usage = self._aggregate_usage(candidate.output.usage for candidate in candidates)
 
         if self.gui_config.enable_reflection:
             self.memory.add(
@@ -50,6 +51,7 @@ class DeepAgent(BaseAgent):
             )
 
         output = selected.output
+        output.usage = total_usage
         trace = {
             "profile": "deep",
             "plan": [step.name for step in plan],
@@ -69,3 +71,15 @@ class DeepAgent(BaseAgent):
         }
         output.raw_output = f"{output.raw_output}\n\n[DeepTrace] {json.dumps(trace, ensure_ascii=False)}"
         return output
+
+    def _aggregate_usage(self, usages) -> UsageInfo:
+        total = UsageInfo()
+        for usage in usages:
+            if not usage:
+                continue
+            total.input_tokens += usage.input_tokens
+            total.output_tokens += usage.output_tokens
+            total.total_tokens += usage.total_tokens
+            total.cached_tokens += usage.cached_tokens
+            total.reasoning_tokens += usage.reasoning_tokens
+        return total

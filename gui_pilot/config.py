@@ -22,6 +22,11 @@ class GuiPilotConfig:
     enable_reflection: bool = True
     enable_workflow_prior: bool = True
 
+    def __post_init__(self) -> None:
+        self.profile = normalize_profile(self.profile)
+        if self.candidate_count < 1:
+            raise ValueError("candidate_count must be >= 1")
+
 
 def normalize_profile(profile: str) -> ProfileName:
     """Validate and normalize a profile name."""

@@ -27,4 +27,4 @@ It adds:
 - deterministic arbitration
 - bounded reflection memory
 
-Use it for research, debugging, and high-budget inference settings. The current implementation intentionally reuses `lite` as its execution substrate, so the deeper layers can be strengthened incrementally without breaking the stable path.
+Use it for research, debugging, and high-budget inference settings. The current implementation intentionally reuses `lite` as its execution substrate. Planning, crop proposals, and memory are currently trace/diagnostic layers; crop-conditioned VLM calls and memory-aware reflection are extension points rather than enabled decision inputs.

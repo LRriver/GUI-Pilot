@@ -320,7 +320,8 @@ class BaseAgent:
         签名基于实际的配置值，子类如果重写属性会改变实际值，
         TestRunner 可以通过比较签名来检测篡改。
         """
-        data = f"{self._api_url}|{self._model_id}"
+        api_key_fingerprint = hashlib.sha256(self._api_key.encode()).hexdigest()
+        data = f"{self._api_url}|{self._model_id}|{api_key_fingerprint}"
         return hashlib.md5(data.encode()).hexdigest()
     
     def get_config_signature(self) -> str:
@@ -490,7 +491,7 @@ complete(content='xxx')
         Args:
             messages: 符合 OpenAI 格式的消息列表
             **kwargs: 额外的 API 调用参数（如 temperature, top_p 等）
-                     注意：base_url、api_key、model 等敏感参数会被强制移除
+                     注意：base_url、api_key、model 等敏感参数会被拒绝
         
         Returns:
             API 响应对象（OpenAI ChatCompletion 格式）
@@ -505,18 +506,19 @@ complete(content='xxx')
                 content = response.choices[0].message.content
                 # 解析 content 并返回 AgentOutput...
         """
-        # 1. 检查并移除敏感参数
+        # 1. 检查并拒绝敏感参数
         forbidden_found = []
         
-        for key, value in kwargs.items():
+        for key in kwargs:
             if key.lower() in FORBIDDEN_KWARGS or key in FORBIDDEN_KWARGS:
                 forbidden_found.append(key)
         
         if forbidden_found:
-            logger.warning(
-                f"[安全警告] 以下敏感参数已被移除: {forbidden_found}。"
-                f"请勿尝试传入 base_url、api_key、model 等参数。"
+            raise ConfigTamperError(
+                f"Forbidden API override parameters: {forbidden_found}. "
+                f"base_url, api_key, model, and endpoint configuration are managed by BaseAgent."
             )
+        safe_kwargs = dict(kwargs)
         
         # 2. 运行时签名验证（防止运行时篡改私有变量）
         current_signature = self._compute_runtime_signature()
@@ -546,14 +548,16 @@ complete(content='xxx')
         logger.info(f"[API调用] model={self._model_id}, url={self._api_url}")
         
         # 调用 API
+        extra_body = safe_kwargs.pop("extra_body", None) or {}
+        if not isinstance(extra_body, dict):
+            raise TypeError("extra_body must be a dict when provided")
+        extra_body.setdefault("thinking", {"type": "disabled"})
+
         completion = client.chat.completions.create(
             model=self._model_id,
             messages=messages,
-            extra_body={
-                "thinking": {
-                    "type": "disabled"
-                }
-            }
+            extra_body=extra_body,
+            **safe_kwargs,
         )
         
         return completion
@@ -565,7 +569,8 @@ complete(content='xxx')
         与 _compute_config_signature 不同，此方法直接读取私有变量，
         而不是使用可能被重写的属性。
         """
-        data = f"{self._api_url}|{self._model_id}"
+        api_key_fingerprint = hashlib.sha256(self._api_key.encode()).hexdigest()
+        data = f"{self._api_url}|{self._model_id}|{api_key_fingerprint}"
         return hashlib.md5(data.encode()).hexdigest()
     
     def extract_usage_info(self, response: Any) -> UsageInfo:

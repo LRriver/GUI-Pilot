@@ -169,20 +169,30 @@ def _extract_flight_route(instruction: str) -> Tuple[str, str]:
     return "邯郸", "上海"
 
 
-def _typed_text(history_actions: List[Dict[str, Any]]) -> str:
-    """Return the most recent TYPE payload from runner history."""
+def _is_valid_history_item(item: Dict[str, Any]) -> bool:
+    """Return whether a runner history item actually changed the UI state."""
+    return bool(item.get("is_valid", True))
+
+
+def _typed_text(history_actions: List[Dict[str, Any]], require_valid: bool = True) -> str:
+    """Return the most recent successful TYPE payload from runner history."""
     for item in reversed(history_actions or []):
+        if require_valid and not _is_valid_history_item(item):
+            continue
         if item.get("action") == ACTION_TYPE:
             params = item.get("parameters") or {}
             return str(params.get("text") or "")
     return ""
 
 
-def _last_action(history_actions: List[Dict[str, Any]]) -> str:
+def _last_action(history_actions: List[Dict[str, Any]], require_valid: bool = True) -> str:
     """Return previous action name from runner history."""
     if not history_actions:
         return ""
-    return str(history_actions[-1].get("action") or "")
+    last = history_actions[-1]
+    if require_valid and not _is_valid_history_item(last):
+        return ""
+    return str(last.get("action") or "")
 
 
 def _recent_valid_click_points(history_actions: List[Dict[str, Any]], limit: int = 4) -> List[Tuple[int, int]]:
@@ -211,6 +221,18 @@ def _workflow_action(action: str, parameters: Dict[str, Any], reason: str) -> Ag
         raw_output=f"workflow:{reason}",
         usage=UsageInfo()
     )
+
+
+def _coerce_point(value: Any) -> Optional[List[int]]:
+    """Validate and clamp a normalized coordinate pair."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        x = int(value[0])
+        y = int(value[1])
+    except (TypeError, ValueError):
+        return None
+    return [max(0, min(1000, x)), max(0, min(1000, y))]
 
 
 class LiteAgent(BaseAgent):
@@ -461,6 +483,8 @@ class LiteAgent(BaseAgent):
         instruction = input_data.instruction
         app_name = _extract_app_name(instruction) or ""
         step = input_data.step_count
+        if input_data.history_actions and not _is_valid_history_item(input_data.history_actions[-1]):
+            return None
 
         if app_name == "抖音" and "我的喜欢" in instruction and "搜索" in instruction:
             keyword = _infer_search_keyword(instruction, app_name) or "跳舞"
@@ -1127,29 +1151,25 @@ Parameters: {{}}
         action = action.upper()
 
         if action == ACTION_CLICK:
-            point = params.get("point")
-            if not point or len(point) != 2:
+            point = _coerce_point(params.get("point"))
+            if not point:
                 for key in ["coord", "coordinate", "pos", "position", "xy"]:
-                    if key in params and len(params[key]) == 2:
-                        point = params[key]
+                    point = _coerce_point(params.get(key))
+                    if point:
                         break
-                if not point:
-                    logger.warning(f"Invalid CLICK params: {params}")
-                    return ACTION_COMPLETE, {}
-            x = max(0, min(1000, int(point[0])))
-            y = max(0, min(1000, int(point[1])))
-            params = {"point": [x, y]}
+            if not point:
+                logger.warning(f"Invalid CLICK params: {params}")
+                return ACTION_COMPLETE, {}
+            params = {"point": point}
 
         elif action == ACTION_SCROLL:
-            start = params.get("start_point")
-            end = params.get("end_point")
+            start = _coerce_point(params.get("start_point"))
+            end = _coerce_point(params.get("end_point"))
             if not start or not end:
-                params = {"start_point": [500, 700], "end_point": [500, 300]}
+                logger.warning(f"Invalid SCROLL params: {params}")
+                return ACTION_COMPLETE, {}
             else:
-                params = {
-                    "start_point": [max(0, min(1000, int(start[0]))), max(0, min(1000, int(start[1])))],
-                    "end_point": [max(0, min(1000, int(end[0]))), max(0, min(1000, int(end[1])))]
-                }
+                params = {"start_point": start, "end_point": end}
 
         elif action == ACTION_TYPE:
             text = params.get("text", params.get("content", ""))
@@ -1162,6 +1182,9 @@ Parameters: {{}}
             app = params.get("app_name", params.get("app", ""))
             if not app:
                 app = _extract_app_name(instruction) or ""
+            if not app:
+                logger.warning(f"Empty OPEN app_name")
+                return ACTION_COMPLETE, {}
             params = {"app_name": str(app)}
 
         elif action == ACTION_COMPLETE:
