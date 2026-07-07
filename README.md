@@ -126,6 +126,12 @@ What it does well:
 
 This is the recommended production-style profile.
 
+## Evaluation Trace Example
+
+GUI-Pilot also keeps local-runner visualizations useful for debugging long GUI chains. The montage below shows a multi-step task trace with the predicted actions, clickable regions, and pass/fail status overlaid on each screenshot.
+
+![Local runner evaluation trace](docs/assets/evaluation-trace-preview.jpg)
+
 ### `deep`: high-budget research profile
 
 `deep` is the experimental profile for cases where inference cost is less important than robustness and observability.
